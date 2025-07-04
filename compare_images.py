@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import os
 import csv
 import numpy as np
+import cv2
 
 
 class ImageCanvas:
@@ -200,7 +201,48 @@ class ImageClickApp:
         self.root.destroy()
 
 
+def create_and_warp_speckle_image(width=600, height=400):
+    """
+    Generates a synthetic speckle image and a warped version of it.
+    This saves two images: 'speckle_ref.png' and 'speckle_warped.png'.
+    """
+    print("Generating synthetic speckle images...")
+    
+    # 1. Create a black reference image
+    ref_image = np.zeros((height, width), dtype=np.uint8)
+    
+    # 2. Add random white speckles
+    num_speckles = 2000
+    xs = np.random.randint(0, width, num_speckles)
+    ys = np.random.randint(0, height, num_speckles)
+    for x, y in zip(xs, ys):
+        cv2.circle(ref_image, (x, y), radius=2 , color=(255, 255, 255), thickness=-1)
+        
+    cv2.imwrite('speckle_ref.png', ref_image)
+    print("Saved 'speckle_ref.png'")
+
+    # 3. Define a warp (e.g., rotation and slight scaling/shear)
+    center = (width // 2, height // 2)
+    angle = 5.0  # degrees
+    scale = 1.05
+    
+    # Get the rotation matrix
+    M = cv2.getRotationMatrix2D(center, angle, scale)
+    
+    # Add a small translation (shift)
+    M[0, 2] += 15 # x-shift
+    M[1, 2] += 10 # y-shift
+
+    # 4. Apply the affine warp
+    warped_image = cv2.warpAffine(ref_image, M, (width, height))
+    cv2.imwrite('speckle_warped.png', warped_image)
+    print("Saved 'speckle_warped.png'")
+    
+    return ref_image, warped_image
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ImageClickApp(root, scale=0.5)
-    root.mainloop()
+    # root = tk.Tk()
+    # app = ImageClickApp(root, scale=0.5)
+    # root.mainloop()
+
+    create_and_warp_speckle_image()
