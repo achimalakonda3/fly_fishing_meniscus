@@ -1,4 +1,5 @@
 import tkinter as tk
+import matplotlib.pyplot as plt
 from tkinter import filedialog
 from PIL import Image, ImageTk
 import os
@@ -186,21 +187,36 @@ class ImageCanvas:
         print(f"✅ Exported annotations for {name} to '{out_file}'")
 
 
-def analyze_points(arrays: list[np.ndarray]):
+def analyze_points():
     """
-    Your data analysis logic goes here.
-    Input: a list of NumPy arrays (one per image), shape (N, 2)
-    Example: compute centroid, distances, correlations, etc.
+    Subtract the point positions from identical ones
     """
     print("\n📊 Running analysis on annotations...\n")
 
-    for i, arr in enumerate(arrays):
-        print(f"Image {i + 1}: {arr.shape[0]} points")
-        if arr.shape[0] > 0:
-            centroid = arr.mean(axis=0)
-            print(f"  ↪ Centroid: ({centroid[0]:.2f}, {centroid[1]:.2f})")
-        else:
-            print("  ↪ No points to analyze.")
+    root = tk.Tk()
+    csv_file_path_1 = filedialog.askopenfilename(
+        title = "Select CSV File 1",
+        filetypes = [("CSV Files", "*.csv")]
+    )
+    csv_file_path_2 = filedialog.askopenfilename(
+        title = "Select CSV File 2",
+        filetypes = [("CSV Files", "*.csv")]
+    )
+
+    image_1_points = np.genfromtxt(csv_file_path_1, delimiter=',', skip_header=1)
+    image_2_points = np.genfromtxt(csv_file_path_2, delimiter=',', skip_header=1)
+    image_1_points = np.delete(image_1_points, (0), axis = 0)
+    image_2_points = np.delete(image_2_points, (0), axis = 0)
+    image_2_points = np.delete(image_2_points, (55), axis = 0)
+
+    x_y_diffs = image_1_points - image_2_points[:len(image_1_points)]
+    plt.plot(x_y_diffs)
+    plt.legend(["x", "y"])
+    plt.show()
+
+
+    print(image_1_points.shape, image_1_points)
+    print(image_2_points.shape, image_2_points)
 
 
 class ImageClickApp:
@@ -323,8 +339,9 @@ def visualize_warping(img1, img2):
     
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ImageClickApp(root, scale=0.15)
-    root.mainloop()
+    # root = tk.Tk()
+    # app = ImageClickApp(root, scale=0.15)
+    # root.mainloop()
 
     # create_and_warp_speckle_image()
+    analyze_points()
