@@ -1,5 +1,6 @@
 import tkinter as tk
 import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
 from tkinter import filedialog
 from PIL import Image, ImageTk
 import os
@@ -210,14 +211,46 @@ def analyze_points():
     image_2_points = np.delete(image_2_points, (55), axis = 0)
 
     x_y_diffs = image_1_points - image_2_points[:len(image_1_points)]
+    
+    specimen_image_path = filedialog.askopenfilename(
+                title=f"Select image",
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
+            )
+    specimen_image = Image.open(specimen_image_path)
+    # Image Size
+    height, width = specimen_image.size[1], specimen_image.size[0]
+
     plt.plot(x_y_diffs)
     plt.legend(["x", "y"])
     plt.show()
+    x = image_2_points[:,0]
+    y = image_2_points[:,1]
+    grid_x, grid_y = np.meshgrid(
+        np.arange(width),
+        np.arange(height)
+    )
 
+    heatmap_interp = griddata(
+        points = (x,y),
+        values=x_y_diffs,
+        xi=(grid_x, grid_y),
+        method='linear',
+        fill_value=0
+    )
 
-    print(image_1_points.shape, image_1_points)
-    print(image_2_points.shape, image_2_points)
+    fig, ax = plt.subplots()
+    ax.imshow(specimen_image)
+    ax.quiver(
+        x,y,x_y_diffs[:,0], x_y_diffs[:,1],
+        angles="xy",
+        scale_units = 'xy',
+        scale = 1,
+        color = 'red',
+        width = 0.005
+    )
+    plt.show()
 
+    root.destroy()
 
 class ImageClickApp:
     def __init__(self, root, scale=0.5):
@@ -260,7 +293,6 @@ class ImageClickApp:
 
         self.root.destroy()
 
-
 def create_and_warp_speckle_image(width=1920, height=1080):
     """
     Generates a synthetic speckle image and a warped version of it.
@@ -272,7 +304,7 @@ def create_and_warp_speckle_image(width=1920, height=1080):
     ref_image = np.zeros((height, width), dtype=np.uint8)
     
     # 2. Add random white speckles
-    num_speckles = 60000
+    num_speckles = 600000
     xs = np.random.randint(0, width, num_speckles)
     ys = np.random.randint(0, height, num_speckles)
     for x, y in zip(xs, ys):
@@ -300,7 +332,10 @@ def create_and_warp_speckle_image(width=1920, height=1080):
     
     return ref_image, warped_image
 
-def visualize_warping(img1, img2):
+def visualize_warping_0(image_paths):
+
+    img1 = cv2.imread(image_paths[0])
+    img2 = cv2.imread(image_paths[1])
     sift = cv2.SIFT_create()
 
     kp1, des1 = sift.detectAndCompute(img1, None)
@@ -326,8 +361,8 @@ def visualize_warping(img1, img2):
         print("Not enough good matches found")
         exit()
     
-    img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAYBGR)
-    img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAYBGR)
+    img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
+    img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
     vis = np.hstack((img1_color, img2_color))
 
     pt1 = (int(kp1[pt1_idx].pt[0]), int(kp1[pt1_idx].pt[1]))
@@ -338,10 +373,118 @@ def visualize_warping(img1, img2):
     color = np.random.randint(0,255,(3,)).to_list()
     
 
+def visualize_warping_2(image_paths):
+    img1 = cv2.imread(image_paths[0])
+    img2 = cv2.imread(image_paths[1])
+    img1 = img1[1250:1750, 2700:3300]
+    img2 = img2[1250:1750, 2700:3300]
+    
+    sift = cv2.SIFT_create()
+
+    kp1, des1 = sift.detectAndCompute(img1, None)
+    kp2, des2 = sift.detectAndCompute(img2, None)
+
+    print(f"Found {len(kp1)} keypoints in the first image")
+    print(f"Found {len(kp2)} keypoints in the second image")
+    
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(des1, des2, k=2)
+
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
+
+    print(f"Found {len(good_matches)} good matches after ratio test")
+
+    if len(good_matches) < 10:
+        print("Not enough good matches found")
+        return
+
+    # Convert images to color if needed (in case they're grayscale)
+    if len(img1.shape) == 2 or img1.shape[2] == 1:
+        img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
+    else:
+        img1_color = img1.copy()
+
+    if len(img2.shape) == 2 or img2.shape[2] == 1:
+        img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
+    else:
+        img2_color = img2.copy()
+
+    # Stack images horizontally for visualization (not used here)
+    # vis = np.hstack((img1_color, img2_color))
+
+    x_y_diffs_temp = []
+    image_2_points = []
+
+    for match in good_matches:
+        pt1 = np.array(kp1[match.queryIdx].pt)
+        pt2 = np.array(kp2[match.trainIdx].pt)
+        image_2_points.append(pt2)
+        x_y_diffs_temp.append(pt1 - pt2)
+
+    image_2_points = np.array(image_2_points)
+    x_y_diffs_temp = np.array(x_y_diffs_temp)
+    x_y_diffs = x_y_diffs_temp[np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50]
+    image_2_points = image_2_points[np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50]
+
+    # Plot the difference vectors (x and y components separately)
+    plt.plot(x_y_diffs[:, 0], label='x diff')
+    plt.plot(x_y_diffs[:, 1], label='y diff')
+    plt.legend()
+    plt.title("Displacement Vectors (x and y)")
+    plt.show()
+
+    x = image_2_points[:, 0]
+    y = image_2_points[:, 1]
+
+    fig, ax = plt.subplots()
+    ax.imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+    ax.quiver(x, y, x_y_diffs[:, 0], x_y_diffs[:, 1],
+              angles="xy", scale_units='xy', scale=1, color='red', width=0.003)
+    ax.set_title("Displacement Field")
+    plt.show()
+
+
+
+def crop_and_show_images():
+    # Hide the main Tkinter window
+    root = tk.Tk()
+    root.withdraw()
+
+    image_paths = []
+    for _ in range(2):
+        # Open file dialog to select an image
+        file_path = filedialog.askopenfilename(
+            title="Select an Image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tiff")]
+        )
+        image_paths.append(file_path)
+
+        # Proceed only if a file was selected
+        if file_path:
+            # Load the image
+            image = cv2.imread(file_path)
+
+            # Crop the image (y1:y2, x1:x2)
+            cropped = image[1250:1750, 2700:3300]  # Adjust as needed
+
+            # Display the cropped image
+            cv2.imshow("Cropped Image", cropped)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        else:
+            print("No file selected.")
+    
+    return image_paths
+
 if __name__ == "__main__":
     # root = tk.Tk()
     # app = ImageClickApp(root, scale=0.15)
     # root.mainloop()
 
-    # create_and_warp_speckle_image()
-    analyze_points()
+    # create_and_warp_speckle_image(2550, 3300)
+    image_paths = crop_and_show_images()
+    visualize_warping_2(image_paths)
+    # analyze_points()

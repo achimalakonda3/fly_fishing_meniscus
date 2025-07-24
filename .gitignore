@@ -2,5 +2,9 @@
 *.png
 *.gif
 *.csv
+*.CR2
+*.JPG
+
+cylinder_photos
 
 .venv
