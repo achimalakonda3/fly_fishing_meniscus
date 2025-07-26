@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 
 
-class ImageCanvas:
+class Crop_and_Point_Clicking_ImageCanvas:
     def __init__(self, parent_frame, image_path, scale):
         self.image_path = image_path
         self.scale = scale
@@ -187,6 +187,46 @@ class ImageCanvas:
 
         print(f"✅ Exported annotations for {name} to '{out_file}'")
 
+class ImageClickApp:
+    def __init__(self, root, scale=0.5):
+        self.root = root
+        self.root.title("Zoom + Annotate + Analyze")
+
+        self.scale = scale
+        self.frame = tk.Frame(root)
+        self.frame.pack()
+
+        self.canvases = []
+
+        for i in range(2):
+            print(f"Select image {i + 1}")
+            path = filedialog.askopenfilename(
+                title=f"Select image {i + 1}",
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
+            )
+            if not path:
+                print("Image selection cancelled. Exiting.")
+                root.destroy()
+                return
+
+            image_canvas = Crop_and_Point_Clicking_ImageCanvas(self.frame, path, scale)
+            image_canvas.on_crop_complete = self.sync_zoom
+            self.canvases.append(image_canvas)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def sync_zoom(self, crop_box):
+        for canvas in self.canvases:
+            canvas.zoom_to_crop(crop_box)
+
+    def on_close(self):
+        for canvas in self.canvases:
+            canvas.export_annotations()
+
+        # Call your analysis function
+        analyze_points([c.annotation_array for c in self.canvases])
+
+        self.root.destroy()
 
 def analyze_points():
     """
@@ -252,47 +292,6 @@ def analyze_points():
 
     root.destroy()
 
-class ImageClickApp:
-    def __init__(self, root, scale=0.5):
-        self.root = root
-        self.root.title("Zoom + Annotate + Analyze")
-
-        self.scale = scale
-        self.frame = tk.Frame(root)
-        self.frame.pack()
-
-        self.canvases = []
-
-        for i in range(2):
-            print(f"Select image {i + 1}")
-            path = filedialog.askopenfilename(
-                title=f"Select image {i + 1}",
-                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
-            )
-            if not path:
-                print("Image selection cancelled. Exiting.")
-                root.destroy()
-                return
-
-            image_canvas = ImageCanvas(self.frame, path, scale)
-            image_canvas.on_crop_complete = self.sync_zoom
-            self.canvases.append(image_canvas)
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def sync_zoom(self, crop_box):
-        for canvas in self.canvases:
-            canvas.zoom_to_crop(crop_box)
-
-    def on_close(self):
-        for canvas in self.canvases:
-            canvas.export_annotations()
-
-        # Call your analysis function
-        analyze_points([c.annotation_array for c in self.canvases])
-
-        self.root.destroy()
-
 def create_and_warp_speckle_image(width=1920, height=1080):
     """
     Generates a synthetic speckle image and a warped version of it.
@@ -332,48 +331,203 @@ def create_and_warp_speckle_image(width=1920, height=1080):
     
     return ref_image, warped_image
 
-def visualize_warping_0(image_paths):
+class Crop_Rotate_ImageCanvas:
+    def __init__(self, parent_frame, image_path, scale):
+        self.image_path = image_path
+        self.scale = scale
+        self.current_scale = scale
+        self.transformed = False
+        self.cropped = False
+        self.src_pts = []
+        self.image_transformation_matrix = None
 
-    img1 = cv2.imread(image_paths[0])
-    img2 = cv2.imread(image_paths[1])
-    sift = cv2.SIFT_create()
+        self.pil_image = Image.open(image_path)
+        self.orig_width, self.orig_height = self.pil_image.size
+        self.aspect_ratio = self.orig_width / self.orig_height
+        self.display_size = (int(self.orig_width * scale), int(self.orig_height * scale))
+        self.tk_image = None
 
-    kp1, des1 = sift.detectAndCompute(img1, None)
-    kp2, des2 = sift.detectAndCompute(img2, None)
+        self.final_display_size = (int(400), int(600)) # width , height
 
-    print(f"Found {len(kp1)} keypoints in the first image")
-    print(f"Found {len(kp2)} keypoints in the second image")
-    
-    
-    bf = cv2.BFMatcher()
-    matches = bf.knnMatch(des1, des2, k=2)
+        self.canvas = tk.Canvas(parent_frame, width = self.display_size[0], height = self.display_size[1])
+        self.canvas.pack(side=tk.LEFT)
+        self.canvas.focus_set()
 
-    good_matches = []
-    for m, n in matches:
-        # m is the best match, n is the second-best match
-        # If the distance to the best match is significantly smaller than the second best, then the match is considered confident
-        if m.distance < 0.75 * n.distance:
-            good_matches.append(m)
+        self.load_display_image()
+
+        self.canvas.bind("<Button-1>", self.handle_click)
+        self.canvas.bind("<KeyPress>", self.handle_keypress)
+
+        self.on_transform_complete = None
+
+    def transform_image(self, image_transformation):
+        self.image_mat = np.array(self.pil_image)
+        self.transformed_image_mat, _ = cv2.warpAffine(self.image_mat, image_transformation, self.final_display_size)
+        self.image_to_display = Image.fromarray(self.transformed_image_mat)
+        self.on_transform_complete(self.image_transformation_matrix)
+        self.transformed = True
+
+    def load_display_image(self):
+        if not self.transformed:
+            self.image_to_display = self.pil_image
+            self.current_scale = self.scale
+        else:
+            self.current_scale = 0.5
+
+        resized_image = self.image_to_display.resize(self.display_size, Image.Resampling.LANCZOS)
+        self.tk_image = ImageTk.PhotoImage(resized_image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0,0, anchor="nw", image=self.tk_image)
+
+    def handle_click(self, event):
+        if len(self.src_pts) < 2:
+            x_display, y_display = event.x, event.y
+            self.src_pts.append([x_display, y_display])
+            print(f"{self.src_pts}")
+
+    def handle_keypress(self, event):
+        if event.keysym == 'e':
+            print(f"{self.src_pts}")
+            # if len(self.src_pts) == 2 : # Once we have two points selected
+            self.image_mat = np.array(self.pil_image)
+            self.calculate_image_transformation()
+            
+            self.transformed_image_mat, _ = cv2.warpAffine(self.image_mat, self.image_transformation_matrix, self.final_display_size)
+            self.image_to_display = Image.fromarray(self.transformed_image_mat)
+            self.transformed = True
+            self.on_transform_complete(self.image_transformation_matrix)
+
+    def calculate_image_transformation(self):
+        # We are defining an image tranformation for cropping, rotating and aligning
+        dst_pts = np.array([[200, 100], [200, 500]])
+        src_pts = np.array(self.src_pts)
+
+        self.image_transformation_matrix = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+        print(self.image_transformation_matrix)
+
+class Image_Compare_App:
+    def __init__(self, root, scale=0.5):
+        self.root = root
+        self.root.title("Transform + Analyze")
+
+        self.scale = scale
+        self.frame = tk.Frame(root)
+        self.frame.pack()
+
+        self.canvases = []
+
+        for i in range(2):
+            print(f"select image{i + 1}")
+            path = filedialog.askopenfilename(
+                title=f"Select image {i + 1}",
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
+            )
+            if not path:
+                print("Image selection cancelled. Exiting.")
+                root.destroy()
+                return
+            
+            image_canvas = Crop_Rotate_ImageCanvas(self.frame, path, scale)
+            image_canvas.on_transform_complete = self.sync_transform
+            self.canvases.append(image_canvas)
+
+    def sync_transform(self, image_transformation_matrix):
+        for canvas in self.canvases:
+            canvas.transform_image(image_transformation_matrix)
+
+    def analyze_warping(img1, img2):
+        sift = cv2.SIFT_create()
+
+        kp1, des1 = sift.detectAndCompute(img1, None)
+        kp2, des2 = sift.detectAndCompute(img2, None)
+
+        print(f"Found {len(kp1)} keypoints in the first image")
+        print(f"Found {len(kp2)} keypoints in the second image")
+        
+        bf = cv2.BFMatcher()
+        matches = bf.knnMatch(des1, des2, k=2)
+
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                good_matches.append(m)
 
         print(f"Found {len(good_matches)} good matches after ratio test")
 
-    if len(good_matches) < 10:
-        print("Not enough good matches found")
-        exit()
-    
-    img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
-    img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
-    vis = np.hstack((img1_color, img2_color))
+        if len(good_matches) < 10:
+            print("Not enough good matches found")
+            return
 
-    pt1 = (int(kp1[pt1_idx].pt[0]), int(kp1[pt1_idx].pt[1]))
-    pt2 = (int(kp2[pt2_idx].pt[0]), int(kp2[pt2_idx].pt[1]))
+        # Convert images to color if needed (in case they're grayscale)
+        if len(img1.shape) == 2 or img1.shape[2] == 1:
+            img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
+        else:
+            img1_color = img1.copy()
 
-    pt2_shifted = (pt2[0] + img1.shape[1], pt2[1])
+        if len(img2.shape) == 2 or img2.shape[2] == 1:
+            img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
+        else:
+            img2_color = img2.copy()
 
-    color = np.random.randint(0,255,(3,)).to_list()
-    
+        # Stack images horizontally for visualization (not used here)
+        # vis = np.hstack((img1_color, img2_color))
 
-def visualize_warping_2(image_paths):
+        x_y_diffs_temp = []
+        image_2_points = []
+
+        for match in good_matches:
+            pt1 = np.array(kp1[match.queryIdx].pt)
+            pt2 = np.array(kp2[match.trainIdx].pt)
+            image_2_points.append(pt2)
+            x_y_diffs_temp.append(pt1 - pt2)
+
+        image_2_points = np.array(image_2_points)
+        x_y_diffs_temp = np.array(x_y_diffs_temp)
+        x_y_diffs = x_y_diffs_temp[np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50]
+        image_2_points = image_2_points[np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50]
+
+        # Plot the difference vectors (x and y components separately)
+        plt.plot(x_y_diffs[:, 0], label='x diff')
+        plt.plot(x_y_diffs[:, 1], label='y diff')
+        plt.legend()
+        plt.title("Displacement Vectors (x and y)")
+        plt.show()
+
+        x = image_2_points[:, 0]
+        y = image_2_points[:, 1]
+
+        fig, ax = plt.subplots()
+        ax.imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+        ax.quiver(x, y, x_y_diffs[:, 0], x_y_diffs[:, 1],
+                angles="xy", scale_units='xy', scale=1, color='red', width=0.003)
+        ax.set_title("Displacement Field")
+        plt.show()
+
+        return x_y_diffs, image_2_points
+
+    def on_close(self):
+        try:
+            try:
+                img1 = self.canvases[0].transformed_image_mat
+                img2 = self.canvases[1].transformed_image_mat
+                x_y_diffs, img2_pts = self.analyze_warping(img1, img2)
+                data_to_save = np.hstack((x_y_diffs, img2_pts))
+            except:
+                print("Error with Analysis")
+            
+            file_object = filedialog.asksaveasfile(title="Save csv file as", mode='w', defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+            if file_object:
+                with file_object as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['x diff', 'y diff', 'init x', 'init y'])
+                    writer.writerows(data_to_save)
+        except:
+            print("Error with Saving")
+
+        
+
+
+def visualize_warping(image_paths):
     img1 = cv2.imread(image_paths[0])
     img2 = cv2.imread(image_paths[1])
     img1 = img1[1250:1750, 2700:3300]
@@ -446,7 +600,7 @@ def visualize_warping_2(image_paths):
     ax.set_title("Displacement Field")
     plt.show()
 
-
+    return x_y_diffs, image_2_points
 
 def crop_and_show_images():
     # Hide the main Tkinter window
@@ -484,7 +638,12 @@ if __name__ == "__main__":
     # app = ImageClickApp(root, scale=0.15)
     # root.mainloop()
 
-    # create_and_warp_speckle_image(2550, 3300)
-    image_paths = crop_and_show_images()
-    visualize_warping_2(image_paths)
+    root = tk.Tk()
+    app = Image_Compare_App(root, scale = 0.15)
+    root.mainloop()
+
+    # # create_and_warp_speckle_image(2550, 3300)
+    # image_paths = crop_and_show_images()
+    # x_y_diffs, image_2_points = visualize_warping(image_paths)
+    
     # analyze_points()
