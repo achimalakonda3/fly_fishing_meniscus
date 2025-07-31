@@ -8,7 +8,6 @@ import csv
 import numpy as np
 import cv2
 
-
 class Crop_and_Point_Clicking_ImageCanvas:
     def __init__(self, parent_frame, image_path, scale):
         self.image_path = image_path
@@ -359,13 +358,15 @@ class Crop_Rotate_ImageCanvas:
         self.canvas.bind("<KeyPress>", self.handle_keypress)
 
         self.on_transform_complete = None
+        self.on_commence_comparison = None
 
     def transform_image(self, image_transformation):
         self.image_mat = np.array(self.pil_image)
-        self.transformed_image_mat, _ = cv2.warpAffine(self.image_mat, image_transformation, self.final_display_size)
+        self.transformed_image_mat = cv2.warpAffine(self.image_mat, image_transformation, self.final_display_size)
         self.image_to_display = Image.fromarray(self.transformed_image_mat)
-        self.on_transform_complete(self.image_transformation_matrix)
+        print(f"Received Transformation Trigger for {self.image_path}")
         self.transformed = True
+        self.load_display_image()
 
     def load_display_image(self):
         if not self.transformed:
@@ -380,30 +381,70 @@ class Crop_Rotate_ImageCanvas:
         self.canvas.create_image(0,0, anchor="nw", image=self.tk_image)
 
     def handle_click(self, event):
+        self.canvas.focus_set()
         if len(self.src_pts) < 2:
             x_display, y_display = event.x, event.y
-            self.src_pts.append([x_display, y_display])
-            print(f"{self.src_pts}")
+            self.src_pts.append((x_display, y_display))
+            print(f"{np.array(self.src_pts)}")
+            print(f"{len(self.src_pts)}")
 
     def handle_keypress(self, event):
         if event.keysym == 'e':
-            print(f"{self.src_pts}")
-            # if len(self.src_pts) == 2 : # Once we have two points selected
-            self.image_mat = np.array(self.pil_image)
-            self.calculate_image_transformation()
-            
-            self.transformed_image_mat, _ = cv2.warpAffine(self.image_mat, self.image_transformation_matrix, self.final_display_size)
-            self.image_to_display = Image.fromarray(self.transformed_image_mat)
-            self.transformed = True
-            self.on_transform_complete(self.image_transformation_matrix)
+            print(f"{np.array(self.src_pts)}")
+            print(f"{len(self.src_pts)}")
+            if len(self.src_pts) == 2 : # Once we have two points selected
+                self.image_mat = np.array(self.pil_image)
+                self.calculate_image_transformation()
+                self.on_transform_complete(self.image_transformation_matrix)
+
+        if event.keysym == 'a':
+            self.on_commence_comparison()
 
     def calculate_image_transformation(self):
-        # We are defining an image tranformation for cropping, rotating and aligning
-        dst_pts = np.array([[200, 100], [200, 500]])
-        src_pts = np.array(self.src_pts)
+        # Get original image and canvas dimensions
+        orig_h, orig_w = self.image_mat.shape[:2]
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
 
-        self.image_transformation_matrix = cv2.estimateAffinePartial2D(src_pts, dst_pts)
-        print(self.image_transformation_matrix)
+        # Calculate the single, aspect-ratio-preserving scale factor
+        scale = min(canvas_w / orig_w, canvas_h / orig_h)
+
+        # Calculate the size of the image as it's actually displayed on the canvas
+        # This is NOT the same as canvas_w, canvas_h if there's letterboxing
+        display_w = int(orig_w * scale)
+        display_h = int(orig_h * scale)
+
+        # Calculate the padding (offset) of the image from the top-left of the canvas
+        offset_x = (canvas_w - display_w) // 2
+        offset_y = (canvas_h - display_h) // 2
+
+        # Now, when converting click points, use this scale and offset
+        p1_canvas, p2_canvas = self.src_pts
+        src_pts_orig = np.float32([
+            [(p1_canvas[0] - offset_x) / scale, (p1_canvas[1] - offset_y) / scale],
+            [(p2_canvas[0] - offset_x) / scale, (p2_canvas[1] - offset_y) / scale]
+        ])
+
+        # 2. Define Destination Points in the Original Image's Coordinate Space
+        # We want the rod to be centered horizontally on the canvas.
+        # Let's make it occupy 80% of the canvas width.
+        canvas_center_x = (self.canvas.winfo_width() / 2) * scale
+        canvas_center_y = (self.canvas.winfo_height() / 2) * scale
+        target_half_width = (self.canvas.winfo_width() * 0.8 / 2) * scale
+
+        dst_pts_orig = np.float32([
+            [canvas_center_x - target_half_width, canvas_center_y],
+            [canvas_center_x + target_half_width, canvas_center_y]
+        ])
+
+        # 3. Let OpenCV Calculate the Best Transformation Matrix
+        # This function finds the optimal rotation, translation, and uniform scaling.
+        # It's perfect for this use case and handles all the math internally.
+        transformation_matrix, _ = cv2.estimateAffinePartial2D(src_pts_orig, dst_pts_orig)
+
+        # The result is a 2x3 matrix, exactly what warpAffine needs.
+        self.image_transformation_matrix = transformation_matrix
+        print("Robust Transformation Matrix:\n", self.image_transformation_matrix)
 
 class Image_Compare_App:
     def __init__(self, root, scale=0.5):
@@ -429,13 +470,14 @@ class Image_Compare_App:
             
             image_canvas = Crop_Rotate_ImageCanvas(self.frame, path, scale)
             image_canvas.on_transform_complete = self.sync_transform
+            image_canvas.on_commence_comparison = self.analyze_warping
             self.canvases.append(image_canvas)
 
     def sync_transform(self, image_transformation_matrix):
         for canvas in self.canvases:
             canvas.transform_image(image_transformation_matrix)
 
-    def analyze_warping(img1, img2):
+    def analyze_warping(self, img1, img2):
         sift = cv2.SIFT_create()
 
         kp1, des1 = sift.detectAndCompute(img1, None)
@@ -468,9 +510,6 @@ class Image_Compare_App:
             img2_color = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
         else:
             img2_color = img2.copy()
-
-        # Stack images horizontally for visualization (not used here)
-        # vis = np.hstack((img1_color, img2_color))
 
         x_y_diffs_temp = []
         image_2_points = []
@@ -505,7 +544,8 @@ class Image_Compare_App:
 
         return x_y_diffs, image_2_points
 
-    def on_close(self):
+
+    def generate_comparison_csv(self):
         try:
             try:
                 img1 = self.canvases[0].transformed_image_mat
@@ -523,6 +563,9 @@ class Image_Compare_App:
                     writer.writerows(data_to_save)
         except:
             print("Error with Saving")
+
+    def on_close(self):
+        
 
         
 
