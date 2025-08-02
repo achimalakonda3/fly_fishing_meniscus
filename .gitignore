@@ -8,3 +8,6 @@
 cylinder_photos
 
 .venv
+.python-version
+uv.lock
+__pycache__
