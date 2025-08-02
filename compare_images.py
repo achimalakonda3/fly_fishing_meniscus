@@ -346,7 +346,7 @@ class Crop_Rotate_ImageCanvas:
         self.display_size = (int(self.orig_width * scale), int(self.orig_height * scale))
         self.tk_image = None
 
-        self.final_display_size = (int(400), int(600)) # width , height
+        self.final_display_size = self.display_size
 
         self.canvas = tk.Canvas(parent_frame, width = self.display_size[0], height = self.display_size[1])
         self.canvas.pack(side=tk.LEFT)
@@ -372,6 +372,8 @@ class Crop_Rotate_ImageCanvas:
         if not self.transformed:
             self.image_to_display = self.pil_image
             self.current_scale = self.scale
+            for i, (x,y) in enumerate(self.src_pts):
+                self.canvas.create_oval()
         else:
             self.current_scale = 0.5
 
@@ -407,7 +409,7 @@ class Crop_Rotate_ImageCanvas:
         canvas_h = self.canvas.winfo_height()
 
         # Calculate the single, aspect-ratio-preserving scale factor
-        scale = min(canvas_w / orig_w, canvas_h / orig_h)
+        scale = 2.5 * min(canvas_w / orig_w, canvas_h / orig_h)
 
         # Calculate the size of the image as it's actually displayed on the canvas
         # This is NOT the same as canvas_w, canvas_h if there's letterboxing
@@ -434,8 +436,10 @@ class Crop_Rotate_ImageCanvas:
 
         dst_pts_orig = np.float32([
             [canvas_center_x - target_half_width, canvas_center_y],
-            [canvas_center_x + target_half_width, canvas_center_y]
+            [canvas_center_x + target_half_width , canvas_center_y]
         ])
+        print(src_pts_orig)
+        print(dst_pts_orig)
 
         # 3. Let OpenCV Calculate the Best Transformation Matrix
         # This function finds the optimal rotation, translation, and uniform scaling.
@@ -470,7 +474,7 @@ class Image_Compare_App:
             
             image_canvas = Crop_Rotate_ImageCanvas(self.frame, path, scale)
             image_canvas.on_transform_complete = self.sync_transform
-            image_canvas.on_commence_comparison = self.analyze_warping
+            image_canvas.on_commence_comparison = self.generate_comparison_csv
             self.canvases.append(image_canvas)
 
     def sync_transform(self, image_transformation_matrix):
@@ -536,14 +540,13 @@ class Image_Compare_App:
         y = image_2_points[:, 1]
 
         fig, ax = plt.subplots()
-        ax.imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+        ax.imshow(img2)
         ax.quiver(x, y, x_y_diffs[:, 0], x_y_diffs[:, 1],
                 angles="xy", scale_units='xy', scale=1, color='red', width=0.003)
         ax.set_title("Displacement Field")
         plt.show()
 
         return x_y_diffs, image_2_points
-
 
     def generate_comparison_csv(self):
         try:
@@ -555,16 +558,22 @@ class Image_Compare_App:
             except:
                 print("Error with Analysis")
             
-            file_object = filedialog.asksaveasfile(title="Save csv file as", mode='w', defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
-            if file_object:
-                with file_object as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['x diff', 'y diff', 'init x', 'init y'])
-                    writer.writerows(data_to_save)
+                file_path = filedialog.asksaveasfilename(
+                    title="Save csv file as",
+                    defaultextension=".csv",
+                    filetypes=[("CSV files", "*.csv")]
+                )
+
+                if file_path:
+                    with open(file_path, mode='w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['x diff', 'y diff', 'init x', 'init y'])
+                        writer.writerows(data_to_save)
         except:
             print("Error with Saving")
 
     def on_close(self):
+        self.root.destroy()
         
 
         
