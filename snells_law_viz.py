@@ -163,6 +163,40 @@ def clear_edge_points_and_plot(parent_root = None):
     plt.title("Y Position vs Water Surface Angle")
     plt.show()
 
+def surface_integral_calcs(parent_root = None):
+    if parent_root is None:
+        root = Tk()
+        root.withdraw
+    else:
+        root = parent_root
+    path = filedialog.askopenfilename( parent=root,
+                title=f"Select csv file",
+                filetypes=[("csv files", "*.csv")]
+            )
+    if not path:
+        print("No file selected. Exiting function.")
+        # If a temporary root was created, destroy it.
+        if parent_root is None:
+            root.destroy()
+        return
+    
+    diffraction_data = pl.read_csv(path)
+    diffraction_data = diffraction_data.with_columns(pl.col("theta 2").tan().abs().alias("gradient magnitude"))
+    gradient_x_calc = pl.col("gradient magnitude") * pl.col("x diff") / (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
+    gradient_y_calc = pl.col("gradient magnitude") * pl.col("y diff") / (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
+    diffraction_data = diffraction_data.with_columns(gradient_x_calc.alias("gradient x"))
+    diffraction_data = diffraction_data.with_columns(gradient_y_calc.alias("gradient y"))
+    diffraction_data.write_csv(path)
+
+    gradient_x_numpy_array = diffraction_data["gradient x"].to_numpy()
+    gradient_y_numpy_array = diffraction_data["gradient y"].to_numpy()
+    np.hstack((gradient_x_numpy_array, gradient_y_numpy_array))
+    
+    init_x_numpy_array = diffraction_data["init x (mm)"].to_numpy()
+    init_y_numpy_array = diffraction_data["init y (mm)"].to_numpy()
+    points_xy_numpy_array = np.hstack((init_x_numpy_array, init_y_numpy_array))
+    
+
 
 if __name__ == "__main__":
     # interface_angles = np.linspace(0, -90, 40)
@@ -177,4 +211,4 @@ if __name__ == "__main__":
     # plt.ylabel("Incident Ray Angle (degrees)")
     # plt.show()
 
-    clear_edge_points_and_plot()
+    surface_integral_calcs()
