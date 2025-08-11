@@ -5,6 +5,12 @@ from PIL import Image, ImageTk
 import csv
 import numpy as np
 import cv2
+import polars as pl
+from scipy.optimize import fsolve
+import imageio
+from tkinter import filedialog
+
+from snells_law_viz import diffraction_differences_to_meniscus
 
 def create_and_warp_speckle_image(width=1920, height=1080):
     """
@@ -76,18 +82,12 @@ class Crop_Rotate_ImageCanvas:
         self.on_commence_comparison = None
 
     def transform_image(self, image_transformation):
-        """
-        CORRECTED: This function now warps the image to its full original dimensions
-        to preserve quality and ensure the transformation is applied correctly.
-        """
         self.image_mat = np.array(self.pil_image)
         
-        # PROBLEM 2 FIX: The output size (dsize) for warpAffine must be the full original width and height.
         output_size = (self.orig_width, self.orig_height) # Use (width, height) tuple
         
         self.transformed_image_mat = cv2.warpAffine(self.image_mat, image_transformation, output_size)
         
-        # This PIL image is now a full-resolution transformed image
         self.image_to_display = Image.fromarray(self.transformed_image_mat)
         
         print(f"Received Transformation Trigger for {self.image_path}")
@@ -156,16 +156,16 @@ class Crop_Rotate_ImageCanvas:
         # Make the rod occupy 60% of the final image's width
         target_half_width = (self.orig_width * 0.6) / 2
         
-        dst_pts_orig = np.float32([
+        self.dst_pts_orig = np.float32([
             [(self.orig_width / 2) - target_half_width, target_center_y],
             [(self.orig_width / 2) + target_half_width, target_center_y]
         ])
         
         print("Source Points (Original Coords):", src_pts_orig)
-        print("Destination Points (Original Coords):", dst_pts_orig)
+        print("Destination Points (Original Coords):", self.dst_pts_orig)
 
         # --- 3. Let OpenCV Calculate the Matrix ---
-        transformation_matrix, _ = cv2.estimateAffinePartial2D(src_pts_orig, dst_pts_orig)
+        transformation_matrix, _ = cv2.estimateAffinePartial2D(src_pts_orig, self.dst_pts_orig)
 
         if transformation_matrix is None:
             print("Error: Could not estimate transformation. Check click points are not identical.")
@@ -288,20 +288,27 @@ class Image_Compare_App:
                 filetypes=[("CSV files", "*.csv")]
             )
 
+
             if file_path:
                 with open(file_path, mode='w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(['x diff', 'y diff', 'init x', 'init y'])
                     writer.writerows(data_to_save)
+
         except:
             print("Error with Saving")
+        try:
+            diffraction_differences_to_meniscus()
+        except:
+            print("Error Analyzing Data")
+
 
     def on_close(self):
         self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = Image_Compare_App(root, scale = 0.15)
+    app = Image_Compare_App(root, scale = 0.5)
     root.mainloop()
 
     # # create_and_warp_speckle_image(2550, 3300)
