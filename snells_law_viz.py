@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 import numpy as np
 import imageio
 import os
@@ -6,6 +7,9 @@ from tkinter import filedialog
 from tkinter import Tk
 import polars as pl
 from scipy.optimize import fsolve
+from scipy.spatial import Delaunay
+from scipy.sparse import lil_matrix
+from scipy.sparse.linalg import spsolve
 
 def gif_generator():
     angles = np.linspace(0, -90, 40)
@@ -186,15 +190,114 @@ def surface_integral_calcs(parent_root = None):
     gradient_y_calc = pl.col("gradient magnitude") * pl.col("y diff") / (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
     diffraction_data = diffraction_data.with_columns(gradient_x_calc.alias("gradient x"))
     diffraction_data = diffraction_data.with_columns(gradient_y_calc.alias("gradient y"))
-    diffraction_data.write_csv(path)
+    # diffraction_data.write_csv(path)
 
-    gradient_x_numpy_array = diffraction_data["gradient x"].to_numpy()
-    gradient_y_numpy_array = diffraction_data["gradient y"].to_numpy()
-    np.hstack((gradient_x_numpy_array, gradient_y_numpy_array))
+    gx = diffraction_data["gradient x"].to_numpy()
+    gy = diffraction_data["gradient y"].to_numpy()
     
     init_x_numpy_array = diffraction_data["init x (mm)"].to_numpy()
     init_y_numpy_array = diffraction_data["init y (mm)"].to_numpy()
-    points_xy_numpy_array = np.hstack((init_x_numpy_array, init_y_numpy_array))
+    points = np.vstack((init_x_numpy_array, init_y_numpy_array)).transpose()
+
+    matrix = np.column_stack((np.ones(points.shape[0]), points))    
+    print(matrix)
+
+    tri = Delaunay(points)
+    simplices = tri.simplices
+    print("Triangulation:", simplices.shape[0], "triangles,", points.shape[0], "points")
+
+    # Prepare global FEM assembly
+    Nnodes = points.shape[0]
+    K = lil_matrix((Nnodes, Nnodes), dtype=np.float64)
+    b = np.zeros(Nnodes, dtype=np.float64)
+
+    # For each triangle: fit planes to gx and gy (linear -> constant derivatives)
+    for simplex in simplices:
+        inds = simplex
+        pts = points[inds]          # shape (3,2)
+        gx_vals = gx[inds]
+        gy_vals = gy[inds]
+
+        # Build matrix [1 x y] for the three vertices
+        M = np.column_stack((np.ones(3), pts))  # shape (3,3)
+        # compute area (signed)
+        area = 0.5 * np.linalg.det(M)
+        if area <= 0:
+            # degenerate triangle? skip
+            continue
+        # Solve for plane coefficients: v ~ a + b*x + c*y
+        coeffs_gx = np.linalg.solve(M, gx_vals)   # [a, b, c]
+        coeffs_gy = np.linalg.solve(M, gy_vals)
+
+        # partial derivatives inside triangle (constant)
+        dgx_dx = coeffs_gx[1]
+        dgx_dy = coeffs_gx[2]
+        dgy_dx = coeffs_gy[1]
+        dgy_dy = coeffs_gy[2]
+
+        # divergence (source term f) in this triangle
+        f_tri = dgx_dx + dgy_dy
+
+        # Element stiffness matrix for linear triangle
+        # Compute gradients of barycentric (shape) functions:
+        # inverse of M: invM @ [1,0,0]^T gives coefficients of phi1 etc.
+        invM = np.linalg.inv(M)       # shape (3,3)
+        grads = invM[1:, :]           # shape (2,3): rows are d/dx and d/dy for each shape fn
+        # Ke = area * (grads.T @ grads)
+        Ke = area * (grads.T @ grads)  # (3,3)
+
+        # Element load vector: integrate f * phi_i over triangle => f_tri * area / 3 for each node (linear)
+        be = f_tri * area / 3.0 * np.ones(3)
+
+        # Assemble
+        for a in range(3):
+            A = inds[a]
+            b[A] += be[a]
+            for c in range(3):
+                C = inds[c]
+                K[A, C] += Ke[a, c]
+
+    # Apply Dirichlet BC: set one reference node to zero (remove one DOF)
+    # Choose node with smallest x (arbitrary stable choice)
+    ref_node = np.argmin(points[:,0])
+    print("Reference node (z=0):", ref_node, "at", points[ref_node])
+
+    all_nodes = np.arange(Nnodes)
+    free_nodes = np.setdiff1d(all_nodes, [ref_node])
+
+    K_free = K[free_nodes, :][:, free_nodes].tocsr()
+    b_free = b[free_nodes] - K[free_nodes, :][:, [ref_node]].toarray().flatten() * 0.0  # z_ref = 0, so no contribution
+
+    print("Solving linear system with", K_free.shape[0], "unknowns...")
+    z_free = spsolve(K_free, b_free)
+
+    z = np.zeros(Nnodes, dtype=float)
+    z[free_nodes] = z_free
+    z[ref_node] = 0.0
+
+    # Optional: shift so min z = 0 for nicer plotting
+    z = z - np.min(z)
+
+    # Plot using triangulation
+    triang = mtri.Triangulation(points[:,0], points[:,1], simplices)
+    plt.figure(figsize=(8,6))
+    tcf = plt.tricontourf(triang, z, levels=60, cmap="terrain")
+    plt.colorbar(tcf, label="Elevation (arb. units)")
+    plt.triplot(triang, color='k', linewidth=0.3, alpha=0.3)
+    plt.scatter(points[ref_node,0], points[ref_node,1], color='r', s=20, label='reference (z=0)')
+    plt.legend()
+    plt.title("Recovered Elevation from Gradient Field (FEM Poisson)")
+    plt.xlabel("x (mm)")
+    plt.ylabel("y (mm)")
+    plt.gca().set_aspect('equal', 'box')
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+    
+    
     
 
 
