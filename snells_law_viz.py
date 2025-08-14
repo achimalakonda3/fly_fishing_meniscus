@@ -10,6 +10,8 @@ from scipy.optimize import fsolve
 from scipy.spatial import Delaunay
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
+from scipy.sparse import csr_matrix, isspmatrix_csr
+from scipy.sparse.csgraph import connected_components
 
 def gif_generator():
     angles = np.linspace(0, -90, 40)
@@ -186,8 +188,10 @@ def surface_integral_calcs(parent_root = None):
     
     diffraction_data = pl.read_csv(path)
     diffraction_data = diffraction_data.with_columns(pl.col("theta 2").tan().abs().alias("gradient magnitude"))
-    gradient_x_calc = pl.col("gradient magnitude") * pl.col("x diff") / (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
-    gradient_y_calc = pl.col("gradient magnitude") * pl.col("y diff") / (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
+    denom = (pl.col("x diff")**2 + pl.col("y diff")**2).sqrt()
+    denom = pl.when(denom != 0).then(denom).otherwise(1e-12) # Tiny offset
+    gradient_x_calc = pl.col("gradient magnitude") * pl.col("x diff") / denom
+    gradient_y_calc = pl.col("gradient magnitude") * pl.col("y diff") / denom
     diffraction_data = diffraction_data.with_columns(gradient_x_calc.alias("gradient x"))
     diffraction_data = diffraction_data.with_columns(gradient_y_calc.alias("gradient y"))
     # diffraction_data.write_csv(path)
@@ -268,6 +272,53 @@ def surface_integral_calcs(parent_root = None):
     K_free = K[free_nodes, :][:, free_nodes].tocsr()
     b_free = b[free_nodes] - K[free_nodes, :][:, [ref_node]].toarray().flatten() * 0.0  # z_ref = 0, so no contribution
 
+    K_csr = K_free.tocsr()       # ensure CSR
+    print("K shape:", K_csr.shape, " nnz:", K_csr.nnz)
+
+    # 1) check for non-finite entries
+    if not np.isfinite(K_csr.data).all():
+        print("Non-finite values found in K.data")
+
+    # 2) check diagonal zeros
+    diag = K_csr.diagonal()
+    zero_diag_idx = np.where(np.isclose(diag, 0))[0]
+    print("Zero diagonals count:", zero_diag_idx.size)
+    if zero_diag_idx.size:
+        print("Indices with zero diagonal (sample):", zero_diag_idx[:10])
+
+    # 3) connected components of the stiffness graph
+    n_comp, labels = connected_components(csgraph=K_csr, directed=False, return_labels=True)
+    print("Connected components in K:", n_comp)
+
+    if n_comp > 1:
+        ref_nodes = []
+        for c in range(n_comp):
+            comp_idx = np.where(labels == c)[0]
+            # pick node with min x in component (or any)
+            ref_nodes.append(comp_idx[np.argmin(points[comp_idx,0])])
+
+        print("ref nodes per component:", ref_nodes)
+        # then exclude all ref_nodes from free_nodes and set their z = 0
+
+    # round coords to some tolerance and find uniques
+    coords_rounded = np.round(points, decimals=6)  # adjust decimals as needed
+    _, unique_idx, inverse = np.unique(coords_rounded, axis=0, return_index=True, return_inverse=True)
+    if len(unique_idx) != len(points):
+        print("Found duplicates. Unique:", len(unique_idx), "Original:", len(points))
+        # You may want to average gradients for duplicate coords and rebuild mesh
+
+
+    # show how many nodes per component
+    from collections import Counter
+    print("component sizes:", Counter(labels))
+
+    # 4) check node degrees (rows sum magnitude)
+    degrees = np.abs(K_csr).sum(axis=1).A1
+    isolated = np.where(np.isclose(degrees, 0))[0]
+    print("Isolated nodes (degree ~0):", isolated[:10], " count:", isolated.size)
+
+
+
     print("Solving linear system with", K_free.shape[0], "unknowns...")
     z_free = spsolve(K_free, b_free)
 
@@ -278,10 +329,18 @@ def surface_integral_calcs(parent_root = None):
     # Optional: shift so min z = 0 for nicer plotting
     z = z - np.min(z)
 
+
+    mask = np.isnan(z)
+    print(z)
+    print(mask)
+    print(all(mask))
+    z_clean = z.copy()
+    z_clean[~mask] = 0  # or some interpolation/replacement value
+
     # Plot using triangulation
     triang = mtri.Triangulation(points[:,0], points[:,1], simplices)
     plt.figure(figsize=(8,6))
-    tcf = plt.tricontourf(triang, z, levels=60, cmap="terrain")
+    tcf = plt.tricontourf(triang, z_clean, levels=60, cmap="terrain")
     plt.colorbar(tcf, label="Elevation (arb. units)")
     plt.triplot(triang, color='k', linewidth=0.3, alpha=0.3)
     plt.scatter(points[ref_node,0], points[ref_node,1], color='r', s=20, label='reference (z=0)')
