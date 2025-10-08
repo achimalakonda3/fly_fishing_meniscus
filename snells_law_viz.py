@@ -105,9 +105,9 @@ def diffraction_differences_to_meniscus(parent_root = None):
     
     diffraction_data = pl.read_csv(path)
     mm_per_px = 20 / (1280 - 320)
-    depth = 11.00 # mm
-    norm_mm_diff = ( mm_per_px * (pl.col("y diff")**2 + pl.col("x diff")**2).sqrt() )
-    diffraction_data = diffraction_data.with_columns(pl.arctan2(norm_mm_diff, pl.lit(depth)).alias("beta"))
+    depth = 14/32 * 23.5 # mm
+    y_diff_mm = mm_per_px * (pl.col("y diff"))
+    diffraction_data = diffraction_data.with_columns(pl.arctan2(y_diff_mm, pl.lit(depth)).alias("beta"))
     init_x_mm = pl.col("init x") * mm_per_px
     diffraction_data = diffraction_data.with_columns((init_x_mm).alias("init x (mm)"))
     init_y_mm = pl.col("init y") * mm_per_px
@@ -142,7 +142,6 @@ def diffraction_differences_to_meniscus(parent_root = None):
     plt.show()
     diffraction_data.write_csv(path)
     
-
 def clear_edge_points_and_plot(parent_root = None):
     if parent_root is None:
         root = Tk()
@@ -162,7 +161,7 @@ def clear_edge_points_and_plot(parent_root = None):
 
     diffraction_data = pl.read_csv(path)
 
-    diffraction_data = diffraction_data.filter(pl.col("init x").is_between(400, 1200))
+    diffraction_data = diffraction_data.filter(pl.col("init x").is_between(700, 900))
     plt.plot(diffraction_data["init y (mm)"], diffraction_data["theta 1 (deg)"], '.b')
     plt.xlabel("Y Position (mm)")
     plt.ylabel("Water Surface Angle (degrees)")
@@ -351,13 +350,6 @@ def surface_integral_calcs(parent_root = None):
     plt.gca().set_aspect('equal', 'box')
     plt.tight_layout()
     plt.show()
-
-
-
-
-    
-    
-    
 
 
 if __name__ == "__main__":

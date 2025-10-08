@@ -139,7 +139,7 @@ class Crop_Rotate_ImageCanvas:
         # Since your canvas is the same size as the displayed image, there is no offset.
         
         # PROBLEM 1 FIX: Use the known display scale, not a recalculated one.
-        display_scale = self.scale 
+        display_scale = self.scale
 
         p1_canvas, p2_canvas = self.src_pts
         src_pts_orig = np.float32([
