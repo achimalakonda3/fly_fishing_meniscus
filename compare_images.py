@@ -5,11 +5,14 @@ import csv
 import numpy as np
 import cv2
 import polars as pl
+import plotly.express as px
 from scipy.optimize import fsolve
 import imageio
 from io import StringIO
 from streamlit_image_coordinates import streamlit_image_coordinates
-from sklearn.neighbors import NearestNeighbors # IMPORTED FOR OUTLIER REMOVAL
+from sklearn.neighbors import NearestNeighbors
+from scipy.interpolate import griddata
+from scipy.integrate import cumulative_trapezoid 
 
 # This function performs calculations and returns the final DataFrame and a plot figure
 def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth = 14/32 * 23.5, water_RI = 1.3333, length = 20):
@@ -17,11 +20,9 @@ def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth =
     Takes a Polars DataFrame with raw displacement data, calculates meniscus
     angles based on Snell's Law, and returns an enriched DataFrame and a plot.
     """
-    # MODIFIED: mm_per_px is now calculated dynamically based on the image width and the 60% target width from transformation
     pixels_for_length = orig_width * 0.6
     mm_per_px = length / pixels_for_length
     
-    # Perform calculations using Polars expressions
     diffraction_data_df = diffraction_data_df.with_columns(
         (pl.arctan2(pl.col("y diff") * mm_per_px, pl.lit(depth))).alias("beta"),
         (pl.col("init x") * mm_per_px).alias("init x (mm)"),
@@ -56,6 +57,64 @@ def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth =
     
     return diffraction_data_df, fig
 
+def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
+    """
+    Interpolates scattered theta 2 data onto a full pixel grid and plots it as a heatmap.
+    """
+    st.write("Interpolating theta 2 field...")
+    points = meniscus_data[['init x', 'init y']].to_numpy()
+    values = meniscus_data['theta 2 (deg)'].to_numpy()
+    grid_x, grid_y = np.meshgrid(np.arange(width), np.arange(height))
+    interpolated_grid = griddata(points, values, (grid_x, grid_y), method='linear', fill_value=0)
+    fig, ax = plt.subplots()
+    im = ax.imshow(interpolated_grid, cmap='viridis', origin='lower', aspect='auto')
+    cbar = fig.colorbar(im)
+    cbar.set_label("Refraction Angle (Theta 2) in Degrees")
+    ax.set_title("Interpolated Theta 2 Field (Heatmap)")
+    ax.set_xlabel("X pixel coordinate")
+    ax.set_ylabel("Y pixel coordinate")
+    return fig
+
+def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px):
+    """
+    Integrates the surface slope (from theta 1) to reconstruct the 3D meniscus surface
+    and returns an interactive Pydeck chart.
+    """
+    st.write("Reconstructing 3D surface from integrated slopes...")
+    meniscus_data_filtered = meniscus_data.filter((pl.arange(0, meniscus_data.height) + 1) % 1000 == 0)
+    points = meniscus_data_filtered[['init x', 'init y']].to_numpy()
+    # CORRECTED: The slope of the water's surface is tan(theta 1)
+    slopes = np.tan(meniscus_data_filtered['theta 1 (rad)'].to_numpy())
+    
+    grid_x, grid_y = np.meshgrid(np.arange(width), np.arange(height))
+    interpolated_slopes = griddata(points, slopes, (grid_x, grid_y), method='linear', fill_value=0)
+    
+    height_grid_px_y_pos = np.zeros_like(interpolated_slopes)
+    # Use cumulative_trapezoid, prepending with zeros to match shape
+    height_grid_px_y_pos[:, :] = cumulative_trapezoid(interpolated_slopes, axis=0, initial=0)
+
+    height_grid_px = height_grid_px_y_pos
+
+    # height_grid_px_y_neg = np.zeros_like(interpolated_slopes)
+    # height_grid_px_x_pos = np.zeros_like(interpolated_slopes)
+    # height_grid_px_x_neg = np.zeros_like(interpolated_slopes)
+
+    border_vals = np.concatenate([height_grid_px[0, :], height_grid_px[-1, :], height_grid_px[:, 0], height_grid_px[:, -1]])
+    offset = np.mean(border_vals)
+    height_grid_px -= offset
+
+    x_mm, y_mm, z_mm = grid_x * mm_per_px, grid_y * mm_per_px, 100*height_grid_px * mm_per_px
+
+    point_cloud_df = pl.DataFrame({"x": x_mm.ravel(),"y": y_mm.ravel(),"z": z_mm.ravel(),})
+    point_cloud_df = point_cloud_df.filter((pl.arange(0, point_cloud_df.height) + 1) % 10000 == 0)
+    st.write(f"plotting {point_cloud_df.height} points")
+    print(f"plotting {point_cloud_df.height} points")
+    fig = px.scatter_3d(point_cloud_df, x="x", y="y", z="z")
+    fig.update_traces(marker_line=dict(width=1, color='DarkSlateGray'))
+
+    return fig
+
+
 # --- Core Image Processing and Analysis Functions ---
 def create_and_warp_speckle_image(width=1920, height=1080):
     st.write("Generating synthetic speckle images...")
@@ -85,7 +144,6 @@ def calculate_image_transformation(src_pts, orig_width, orig_height):
     transformation_matrix, _ = cv2.estimateAffinePartial2D(src_pts_orig, dst_pts_orig)
     return transformation_matrix
 
-# MODIFIED: This function now includes outlier removal
 def analyze_warping(img1, img2):
     sift = cv2.SIFT_create()
     kp1, des1 = sift.detectAndCompute(img1, None)
@@ -107,38 +165,23 @@ def analyze_warping(img1, img2):
     mask = np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50
     x_y_diffs, image_2_points = x_y_diffs_temp[mask], image_2_points[mask]
 
-    # --- NEW: OUTLIER REMOVAL LOGIC ---
-    if len(x_y_diffs) > 5: # Need at least 6 points to have 5 neighbors
+    if len(x_y_diffs) > 5:
         st.write("Performing outlier removal based on local vector magnitudes...")
         magnitudes = np.linalg.norm(x_y_diffs, axis=1)
-        
-        # Find 5 nearest neighbors for each point (k=6 because a point is its own neighbor)
         nbrs = NearestNeighbors(n_neighbors=6, algorithm='auto').fit(image_2_points)
         distances, indices = nbrs.kneighbors(image_2_points)
-        
-        # Identify outliers
         is_outlier = np.zeros(len(magnitudes), dtype=bool)
         for i in range(len(magnitudes)):
-            # Indices of the 5 nearest neighbors (excluding the point itself)
             neighbor_indices = indices[i, 1:]
-            
-            # Calculate the average magnitude of the neighbors
             avg_neighbor_magnitude = np.mean(magnitudes[neighbor_indices])
-            
-            # If the current point's magnitude is > 150% of the average, mark it as an outlier
             if avg_neighbor_magnitude > 0 and magnitudes[i] > 1.5 * avg_neighbor_magnitude:
                 is_outlier[i] = True
-        
         num_outliers = np.sum(is_outlier)
-        
-        # Keep only the non-outlier points
         x_y_diffs = x_y_diffs[~is_outlier]
         image_2_points = image_2_points[~is_outlier]
-        
         st.write(f"Removed {num_outliers} outlier(s). {len(x_y_diffs)} vectors remain.")
     else:
         st.write("Skipping outlier removal (not enough data points).")
-    # --- END: OUTLIER REMOVAL LOGIC ---
 
     fig1, ax1 = plt.subplots()
     ax1.plot(x_y_diffs[:, 0], label='x diff')
@@ -164,7 +207,9 @@ def initialize_state():
         'analysis_data': None, 'plot1': None, 'plot2': None,
         'last_coord_1': None, 'last_coord_2': None,
         'meniscus_data': None, 'meniscus_plot': None,
-        'theta2_plot': None
+        'theta2_plot': None, 'theta2_grid_plot': None,
+        'pydeck_chart': None, # State for the Pydeck chart
+        'reconstructed_surface_data': None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -266,27 +311,29 @@ else:
                     
                     fig3, ax3 = plt.subplots()
                     ax3.imshow(st.session_state.img2_transformed, cmap='gray')
-                    
                     df = st.session_state.meniscus_data
-                    x, y = df['init x'].to_numpy(), df['init y'].to_numpy()
-                    u, v = df['x diff'].to_numpy(), df['y diff'].to_numpy()
+                    x, y, u, v = df['init x'].to_numpy(), df['init y'].to_numpy(), df['x diff'].to_numpy(), df['y diff'].to_numpy()
                     theta2_mag = df['theta 2 (rad)'].to_numpy()
-                    
-                    norm = np.sqrt(u**2 + v**2)
-                    norm[norm == 0] = 1
-                    
+                    norm = np.sqrt(u**2 + v**2); norm[norm == 0] = 1
                     new_u, new_v = (u / norm) * theta2_mag, (v / norm) * theta2_mag
                     colors = np.abs(theta2_mag)
-                    
-                    ax3.quiver(x, y, new_u, new_v, colors,
-                               angles="xy", scale_units='xy', scale=0.1, cmap='viridis')
+                    ax3.quiver(x, y, new_u, new_v, colors, angles="xy", scale_units='xy', scale=0.1, cmap='viridis')
                     ax3.set_title("Refraction Angle (Theta 2) Field")
                     st.session_state.theta2_plot = fig3
+
+                    interpolated_fig = interpolate_and_plot_theta2_grid(st.session_state.meniscus_data, width=w, height=h)
+                    st.session_state.theta2_grid_plot = interpolated_fig
                     
+                    pixels_for_length = w * 0.6
+                    mm_per_px = length / pixels_for_length
+                    # Get the pydeck chart and the data from the reconstruction function
+                    _3d_figure = reconstruct_and_plot_surface(st.session_state.meniscus_data, w, h, mm_per_px)
+                    st.session_state._3d_figure = _3d_figure
+
                     st.success("Analysis complete.")
                 else:
                     st.session_state.analysis_data = st.session_state.plot1 = st.session_state.plot2 = None
-                    st.session_state.meniscus_data = st.session_state.meniscus_plot = st.session_state.theta2_plot = None
+                    st.session_state.meniscus_data = st.session_state.meniscus_plot = st.session_state.theta2_plot = st.session_state.theta2_grid_plot = st.session_state.pydeck_chart = st.session_state.reconstructed_surface_data = None
                     
     if st.session_state.meniscus_data is not None:
         st.header("Analysis Results")
@@ -301,3 +348,7 @@ else:
         st.pyplot(st.session_state.plot2)
         st.pyplot(st.session_state.theta2_plot)
         st.pyplot(st.session_state.meniscus_plot)
+        st.pyplot(st.session_state.theta2_grid_plot)
+        
+        st.header("Reconstructed 3D Surface")
+        st.plotly_chart(st.session_state._3d_figure, use_container_width=True) # Display the interactive pydeck chart

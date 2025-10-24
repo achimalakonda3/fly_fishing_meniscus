@@ -1,0 +1,132 @@
+[server]
+
+# List of directories to watch for changes.
+#
+# By default, Streamlit watches files in the current working directory
+# and its subdirectories. Use this option to specify additional
+# directories to watch. Paths must be absolute.
+#
+# Default: []
+folderWatchList = []
+
+# List of directories to ignore for changes.
+#
+# By default, Streamlit watches files in the current working directory
+# and its subdirectories. Use this option to specify exceptions within
+# watched directories. Paths can be absolute or relative to the current
+# working directory.
+#
+# Example: ['/home/user1/env', 'relative/path/to/folder']
+#
+# Default: []
+folderWatchBlacklist = []
+
+# Change the type of file watcher used by Streamlit, or turn it off
+# completely.
+#
+# Allowed values:
+# - "auto"     : Streamlit will attempt to use the watchdog module, and
+#                falls back to polling if watchdog isn't available.
+# - "watchdog" : Force Streamlit to use the watchdog module.
+# - "poll"     : Force Streamlit to always use polling.
+# - "none"     : Streamlit will not watch files.
+#
+# Default: "auto"
+fileWatcherType = "auto"
+
+# Symmetric key used to produce signed cookies. If deploying on multiple
+# replicas, this should be set to the same value across all replicas to ensure
+# they all share the same secret.
+#
+# Default: randomly generated secret key.
+cookieSecret = "a-random-key-appears-here"
+
+# If false, will attempt to open a browser window on start.
+#
+# Default: false unless (1) we are on a Linux box where DISPLAY is unset, or
+# (2) we are running in the Streamlit Atom plugin.
+headless = false
+
+# Whether to show a terminal prompt for the user's email address when
+# they run Streamlit (locally) for the first time. If you set
+# `server.headless=True`, Streamlit will not show this prompt.
+#
+# Default: true
+showEmailPrompt = true
+
+# Automatically rerun script when the file is modified on disk.
+#
+# Default: false
+runOnSave = false
+
+# The port where the server will listen for browser connections.# The address where the server will listen for client and browser
+# connections.
+#
+# Use this if you want to bind the server to a specific address.
+# If set, the server will only be accessible from this address, and not from
+# any aliases (like localhost).
+#
+# Default: (unset)
+#
+# Default: 8501
+port = 8501
+
+# The base path for the URL where Streamlit should be served from.
+#
+# Default: ""
+baseUrlPath = ""
+
+# Enables support for Cross-Origin Resource Sharing (CORS) protection,
+# for added security.
+#
+# If XSRF protection is enabled and CORS protection is disabled at the
+# same time, Streamlit will enable them both instead.
+#
+# Default: true
+enableCORS = true
+
+# Allowed list of origins.
+#
+# If CORS protection is enabled (`server.enableCORS=True`), use this
+# option to set a list of allowed origins that the Streamlit server will
+# accept traffic from.
+#
+# This config option does nothing if CORS protection is disabled.
+#
+# Example: ['http://example.com', 'https://streamlit.io']
+#
+# Default: []
+corsAllowedOrigins = []
+
+# Enables support for Cross-Site Request Forgery (XSRF) protection, for
+# added security.
+#
+# If XSRF protection is enabled and CORS protection is disabled at the
+# same time, Streamlit will enable them both instead.
+#
+# Default: true
+enableXsrfProtection = true
+
+# Max size, in megabytes, for files uploaded with the file_uploader.
+#
+# Default: 200
+maxUploadSize = 200
+
+# Max size, in megabytes, of messages that can be sent via the WebSocket
+# connection.
+#
+# Default: 200
+maxMessageSize = 800
+
+# Enables support for websocket compression.
+#
+# Default: false
+enableWebsocketCompression = false
+
+# The interval (in seconds) at which the server pings the client to keep
+# the websocket connection alive.
+#
+# The default value should work for most deployments. However, if you're
+# experiencing frequent disconnections in certain proxy setups (e.g.,
+# "Connection error" messages), you may want to try adjusting this value.
+#
