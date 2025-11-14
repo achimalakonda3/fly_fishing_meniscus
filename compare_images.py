@@ -1,16 +1,16 @@
 import streamlit as st
 import matplotlib.pyplot as plt
 from PIL import Image
-import csv
+import open3d as o3d
 import numpy as np
 import cv2
 import polars as pl
 import plotly.express as px
-from scipy.optimize import fsolve
-import imageio
 from io import StringIO
 from streamlit_image_coordinates import streamlit_image_coordinates
 from sklearn.neighbors import NearestNeighbors
+from scipy.spatial import KDTree
+from scipy.optimize import fsolve
 from scipy.interpolate import griddata
 from scipy.integrate import cumulative_trapezoid 
 
@@ -49,13 +49,15 @@ def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth =
         pl.Series("theta 2 (deg)", np.degrees(theta_2s)),
     ])
 
+    diffraction_data_filtered = diffraction_data_df.filter(pl.col("init x").is_between(700, 900))
+
     fig, ax = plt.subplots()
-    ax.plot(diffraction_data_df["init y (mm)"], diffraction_data_df["theta 1 (deg)"], '.b')
+    ax.plot(diffraction_data_filtered["init y (mm)"], diffraction_data_filtered["theta 2 (deg)"], '.b')
     ax.set_xlabel("Y Position (mm)")
     ax.set_ylabel("Water Surface Angle (degrees)")
     ax.set_title("Y Position vs Water Surface Angle")
     
-    return diffraction_data_df, fig
+    return diffraction_data_df, diffraction_data_filtered, fig
 
 def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
     """
@@ -75,44 +77,118 @@ def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
     ax.set_ylabel("Y pixel coordinate")
     return fig
 
-def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px):
-    """
-    Integrates the surface slope (from theta 1) to reconstruct the 3D meniscus surface
-    and returns an interactive Pydeck chart.
-    """
+def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_dist_px=20):
     st.write("Reconstructing 3D surface from integrated slopes...")
-    meniscus_data_filtered = meniscus_data.filter((pl.arange(0, meniscus_data.height) + 1) % 1000 == 0)
-    points = meniscus_data_filtered[['init x', 'init y']].to_numpy()
-    # CORRECTED: The slope of the water's surface is tan(theta 1)
-    slopes = np.tan(meniscus_data_filtered['theta 1 (rad)'].to_numpy())
-    
+    points = meniscus_data[['init x', 'init y']].to_numpy()
+    slopes = np.tan(meniscus_data['theta 2 (rad)'].to_numpy())
+
+    # --- 1. Build KDTree from original data points for efficient searching ---
+    if points.shape[0] == 0:
+        st.warning("No data points found to build surface.")
+        return None
+    st.write(f"Building KDTree from {len(points)} real data points...")
+    kdtree = KDTree(points)
+
+    # Create the grid for interpolation
     grid_x, grid_y = np.meshgrid(np.arange(width), np.arange(height))
+
+    # --- 2. Calculate distance for each grid point to the nearest real point ---
+    # Create a list of all grid coordinates to query the tree
+    grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
+
+    st.write("Calculating distances from interpolated points to real data points...")
+    # query() returns distance and index; we only need the distance (d)
+    distances, _ = kdtree.query(grid_points, k=1)
+    
+    # Reshape the distances back to the grid's shape
+    distance_grid = distances.reshape(grid_x.shape)
+
+    # Perform interpolation and integration (your original logic)
     interpolated_slopes = griddata(points, slopes, (grid_x, grid_y), method='linear', fill_value=0)
     
-    height_grid_px_y_pos = np.zeros_like(interpolated_slopes)
-    # Use cumulative_trapezoid, prepending with zeros to match shape
-    height_grid_px_y_pos[:, :] = cumulative_trapezoid(interpolated_slopes, axis=0, initial=0)
+    height_grid_px_y_pos = -cumulative_trapezoid(interpolated_slopes, axis=0, initial=0)
+    height_grid_px_y_neg = cumulative_trapezoid(interpolated_slopes[::-1, :], axis=0, initial=0)[::-1, :]
+    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes, axis=1,initial=0) 
+    height_grid_px_x_neg = cumulative_trapezoid(interpolated_slopes[:, ::-1], axis=1,initial=0)[:, ::-1]
 
-    height_grid_px = height_grid_px_y_pos
+    assert np.shape(height_grid_px_x_pos) == np.shape(height_grid_px_y_neg)
+    n,m = np.shape(height_grid_px_x_pos)
+    vertical_multiplier_pos = np.tile(np.linspace(0, 1, n), (m,1)).transpose()
+    vertical_multiplier_neg =  np.tile(np.linspace(1, 0, n), (m,1)).transpose()
+    horizontal_multiplier_pos = np.tile(np.linspace(1, 0, m), (n,1))
+    horizontal_multiplier_neg = np.tile(np.linspace(0, 1, m), (n,1))
 
-    # height_grid_px_y_neg = np.zeros_like(interpolated_slopes)
-    # height_grid_px_x_pos = np.zeros_like(interpolated_slopes)
-    # height_grid_px_x_neg = np.zeros_like(interpolated_slopes)
+    print(np.shape(vertical_multiplier_pos))
+    print(np.shape(horizontal_multiplier_neg))
+    assert np.shape(horizontal_multiplier_neg) == np.shape(height_grid_px_x_neg)
+    assert np.shape(horizontal_multiplier_neg) == np.shape(vertical_multiplier_pos)
 
+    total_weight = (horizontal_multiplier_pos 
+                + horizontal_multiplier_neg 
+                + vertical_multiplier_pos 
+                + vertical_multiplier_neg)
+
+    # Avoid divide-by-zero
+    eps = 1e-12  
+    total_weight_safe = total_weight + eps
+
+    height_grid_px = (
+                    (height_grid_px_x_pos * horizontal_multiplier_pos 
+                    + height_grid_px_x_neg * horizontal_multiplier_neg 
+                    + height_grid_px_y_pos * vertical_multiplier_pos 
+                    + height_grid_px_y_neg * vertical_multiplier_neg)
+                    / total_weight_safe
+                )
+
+
+    # height_grid_px_y = np.where(np.abs(height_grid_px_y_pos) < np.abs(height_grid_px_y_neg), height_grid_px_y_pos, height_grid_px_y_neg)
+    # height_grid_px_x = np.where(np.abs(height_grid_px_x_pos) < np.abs(height_grid_px_x_neg), height_grid_px_x_pos, height_grid_px_x_neg)
+    
+    height_grid_px_y = height_grid_px
+    height_grid_px_x = height_grid_px
+
+    figures = []
+    point_clouds = []
+        
+    
     border_vals = np.concatenate([height_grid_px[0, :], height_grid_px[-1, :], height_grid_px[:, 0], height_grid_px[:, -1]])
     offset = np.mean(border_vals)
     height_grid_px -= offset
 
-    x_mm, y_mm, z_mm = grid_x * mm_per_px, grid_y * mm_per_px, 100*height_grid_px * mm_per_px
+    # --- 3. Create a mask and set distant points to NaN ---
+    mask = distance_grid > max_dist_px
+    st.write(f"Masking out {np.sum(mask)} points further than {max_dist_px} pixels from real data.")
+    height_grid_px[mask] = np.nan
 
-    point_cloud_df = pl.DataFrame({"x": x_mm.ravel(),"y": y_mm.ravel(),"z": z_mm.ravel(),})
-    point_cloud_df = point_cloud_df.filter((pl.arange(0, point_cloud_df.height) + 1) % 10000 == 0)
-    st.write(f"plotting {point_cloud_df.height} points")
-    print(f"plotting {point_cloud_df.height} points")
-    fig = px.scatter_3d(point_cloud_df, x="x", y="y", z="z")
+    # Convert to real-world coordinates
+    x_mm, y_mm, z_mm = grid_x * mm_per_px, grid_y * mm_per_px, 50*height_grid_px * mm_per_px
+
+    # Create DataFrame for plotting
+    point_cloud_df = pl.DataFrame({
+        "x": x_mm.ravel(),
+        "y": y_mm.ravel(),
+        "z": z_mm.ravel(),
+    })
+
+    # --- 4. Filter out the NaN values before plotting ---
+    point_cloud_df = point_cloud_df.filter(pl.col("z").is_not_nan())
+    
+    # Optional: A more robust downsampling for plotting performance
+    max_points_to_plot = 50000
+    if point_cloud_df.height > max_points_to_plot:
+        st.write(f"Downsampling from {point_cloud_df.height} to {max_points_to_plot} random points for plotting.")
+        point_cloud_df = point_cloud_df.sample(n=max_points_to_plot, seed=1)
+
+    st.write(f"Plotting {point_cloud_df.height} points.")
+    if point_cloud_df.height == 0:
+        st.warning(f"No data points left to plot after filtering with max_dist_px={max_dist_px}. Try increasing this value.")
+        return None
+
+    fig = px.scatter_3d(point_cloud_df.to_pandas(), x="x", y="y", z="z", size_max=1)
+    fig.update_layout(scene_aspectmode='data')
     fig.update_traces(marker_line=dict(width=1, color='DarkSlateGray'))
 
-    return fig
+    return fig, point_cloud_df
 
 
 # --- Core Image Processing and Analysis Functions ---
@@ -304,9 +380,10 @@ else:
                     st.session_state.plot1, st.session_state.plot2 = fig1, fig2
                     
                     initial_df = pl.DataFrame(st.session_state.analysis_data, schema=['x diff', 'y diff', 'init x', 'init y'])
-                    final_df, meniscus_fig = diffraction_differences_to_meniscus(initial_df, orig_width=w, depth=water_depth, length=length)
+                    final_df, filtered_df, meniscus_fig = diffraction_differences_to_meniscus(initial_df, orig_width=w, depth=water_depth, length=length)
                     
                     st.session_state.meniscus_data = final_df
+                    st.session_state.filtered_data = filtered_df
                     st.session_state.meniscus_plot = meniscus_fig
                     
                     fig3, ax3 = plt.subplots()
@@ -327,8 +404,10 @@ else:
                     pixels_for_length = w * 0.6
                     mm_per_px = length / pixels_for_length
                     # Get the pydeck chart and the data from the reconstruction function
-                    _3d_figure = reconstruct_and_plot_surface(st.session_state.meniscus_data, w, h, mm_per_px)
+                    _3d_figure, point_cloud_df = reconstruct_and_plot_surface(st.session_state.meniscus_data, w, h, mm_per_px)
                     st.session_state._3d_figure = _3d_figure
+                    st.session_state.point_cloud_df = point_cloud_df
+                    
 
                     st.success("Analysis complete.")
                 else:
@@ -348,7 +427,29 @@ else:
         st.pyplot(st.session_state.plot2)
         st.pyplot(st.session_state.theta2_plot)
         st.pyplot(st.session_state.meniscus_plot)
+        st.dataframe(st.session_state.filtered_data)
         st.pyplot(st.session_state.theta2_grid_plot)
         
-        st.header("Reconstructed 3D Surface")
+        st.header("Reconstructed 3D Surface (integrated x)")
         st.plotly_chart(st.session_state._3d_figure, use_container_width=True) # Display the interactive pydeck chart
+        st.dataframe(st.session_state.point_cloud_df)
+        if st.button("Download x integration as .ply point cloud file"):
+            # Convert to numpy array
+            points = st.session_state.point_cloud_df.select(["x", "y", "z"]).to_numpy()
+
+            # Create and save Open3D PointCloud
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            o3d.io.write_point_cloud("x_reconstructed.ply", pcd)
+
+        # st.header("Reconstructed 3D Surface (integrated y)")
+        # st.plotly_chart(st.session_state._3d_figure_integrated_y, use_container_width=True) # Display the interactive pydeck chart
+        # st.dataframe(st.session_state.point_cloud_df_integrated_y)
+        # if st.button("Download y integration as .ply point cloud file"):
+        #     # Convert to numpy array
+        #     points = st.session_state.point_cloud_df_integrated_y.select(["x", "y", "z"]).to_numpy()
+
+        #     # Create and save Open3D PointCloud
+        #     pcd = o3d.geometry.PointCloud()
+        #     pcd.points = o3d.utility.Vector3dVector(points)
+        #     o3d.io.write_point_cloud("y_reconstructed.ply", pcd)

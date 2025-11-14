@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np
-import imageio
+from PIL import Image, ImageDraw
 import os
 from tkinter import filedialog
 from tkinter import Tk
@@ -12,6 +12,35 @@ from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
 from scipy.sparse import csr_matrix, isspmatrix_csr
 from scipy.sparse.csgraph import connected_components
+import glob
+
+def animaiton_gif_generator():
+    # Folder containing your images
+    image_folder = "housefly_meniscus_1"
+
+    # Get all image file paths (e.g. .png, .jpg)
+    all_frames = sorted(
+        glob.glob(os.path.join(image_folder, "*.png")) +
+        glob.glob(os.path.join(image_folder, "*.jpg")) +
+        glob.glob(os.path.join(image_folder, "*.jpeg"))
+    )
+
+    # Ensure there are images to process
+    if not all_frames:
+        raise ValueError("No image files found in the specified folder.")
+
+    # Open all images
+    images = [Image.open(f) for f in all_frames]
+
+    # Create and save GIF
+    images[0].save(
+        'houesfly_anim_001.gif',
+        save_all=True,
+        append_images=images[1:], 
+        optimize=False,
+        duration=200,  # duration per frame (ms)
+        loop=0        # loop forever
+    )
 
 def gif_generator():
     angles = np.linspace(0, -90, 40)
@@ -79,12 +108,14 @@ def gif_generator():
     all_frames = frame_paths + frame_paths[-2:0:-1]  # Avoid repeating first/last
 
     # Create GIF
-    images = [imageio.imread(f) for f in all_frames]
-    imageio.mimsave("snells_law_loop_0_to_90_deg.gif", images, duration=0.1)
+    images = [Image.open(f) for f in all_frames]
+    images[0].save('snells_law_loop.gif',
+               save_all = True, append_images = images[1:], 
+               optimize = False, duration = 10, loop=0 )
 
     # Optional: clean up
-    # for f in frame_paths:
-    #     os.remove(f)
+    for f in frame_paths:
+        os.remove(f)
 
 def diffraction_differences_to_meniscus(parent_root = None):
     if parent_root is None:
@@ -162,7 +193,7 @@ def clear_edge_points_and_plot(parent_root = None):
     diffraction_data = pl.read_csv(path)
 
     diffraction_data = diffraction_data.filter(pl.col("init x").is_between(700, 900))
-    plt.plot(diffraction_data["init y (mm)"], diffraction_data["theta 1 (deg)"], '.b')
+    plt.plot(diffraction_data["init y (mm)"], diffraction_data["theta 2 (deg)"], '.b')
     plt.xlabel("Y Position (mm)")
     plt.ylabel("Water Surface Angle (degrees)")
     plt.title("Y Position vs Water Surface Angle")
@@ -365,4 +396,4 @@ if __name__ == "__main__":
     # plt.ylabel("Incident Ray Angle (degrees)")
     # plt.show()
 
-    surface_integral_calcs()
+    animaiton_gif_generator()
