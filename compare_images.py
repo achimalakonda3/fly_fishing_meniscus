@@ -80,7 +80,22 @@ def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
 def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_dist_px=20):
     st.write("Reconstructing 3D surface from integrated slopes...")
     points = meniscus_data[['init x', 'init y']].to_numpy()
-    slopes = np.tan(meniscus_data['theta 2 (rad)'].to_numpy())
+    meniscus_data_with_slopes = meniscus_data.with_columns(
+    [
+        (
+            (pl.col('theta 2 (rad)').tan()) *
+            (pl.col('x diff') / ((pl.col('x diff')**2 + pl.col('y diff')**2).sqrt()))
+        ).alias('slope_x_component'),
+        (
+            (pl.col('theta 2 (rad)').tan()) *
+            (pl.col('y diff') / ((pl.col('x diff')**2 + pl.col('y diff')**2).sqrt()))
+        ).alias('slope_y_component')
+    ]
+    )
+
+    # Extract the calculated columns into separate NumPy arrays.
+    slopes_x = meniscus_data_with_slopes['slope_x_component'].to_numpy()
+    slopes_y = meniscus_data_with_slopes['slope_y_component'].to_numpy()
 
     # --- 1. Build KDTree from original data points for efficient searching ---
     if points.shape[0] == 0:
@@ -104,12 +119,13 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
     distance_grid = distances.reshape(grid_x.shape)
 
     # Perform interpolation and integration (your original logic)
-    interpolated_slopes = griddata(points, slopes, (grid_x, grid_y), method='linear', fill_value=0)
+    interpolated_slopes_x = griddata(points, slopes_x, (grid_x, grid_y), method='linear', fill_value=0)
+    interpolated_slopes_y = griddata(points, slopes_y, (grid_x, grid_y), method='linear', fill_value=0)
     
-    height_grid_px_y_pos = -cumulative_trapezoid(interpolated_slopes, axis=0, initial=0)
-    height_grid_px_y_neg = cumulative_trapezoid(interpolated_slopes[::-1, :], axis=0, initial=0)[::-1, :]
-    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes, axis=1,initial=0) 
-    height_grid_px_x_neg = cumulative_trapezoid(interpolated_slopes[:, ::-1], axis=1,initial=0)[:, ::-1]
+    height_grid_px_y_pos = -cumulative_trapezoid(interpolated_slopes_y, axis=0, initial=0)
+    height_grid_px_y_neg = cumulative_trapezoid(interpolated_slopes_y[::-1, :], axis=0, initial=0)[::-1, :]
+    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes_x, axis=1,initial=0) 
+    height_grid_px_x_neg = cumulative_trapezoid(interpolated_slopes_x[:, ::-1], axis=1,initial=0)[:, ::-1]
 
     assert np.shape(height_grid_px_x_pos) == np.shape(height_grid_px_y_neg)
     n,m = np.shape(height_grid_px_x_pos)
@@ -122,6 +138,31 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
     print(np.shape(horizontal_multiplier_neg))
     assert np.shape(horizontal_multiplier_neg) == np.shape(height_grid_px_x_neg)
     assert np.shape(horizontal_multiplier_neg) == np.shape(vertical_multiplier_pos)
+    mask = distance_grid > max_dist_px
+    vertical_multiplier_pos[mask] = 0
+    for i in range(n):
+        if i != 0:
+            for j in range(m):
+                if vertical_multiplier_pos[i-1, j] == 0:
+                    vertical_multiplier_pos[i,j] = 0
+    vertical_multiplier_neg[mask] = 0
+    for i in range(n):
+        if i != n-1:
+            for j in range(m):
+                if vertical_multiplier_neg[i+1, j] == 0:
+                    vertical_multiplier_neg[i,j] = 0
+    horizontal_multiplier_pos[mask] = 0
+    for i in range(n):
+        for j in range(m):
+            if j != 0:
+                if horizontal_multiplier_pos[i, j-1] == 0:
+                    horizontal_multiplier_pos[i,j] = 0
+    horizontal_multiplier_neg[mask] = 0
+    for i in range(n):
+        for j in range(m-1, -1, -1):
+            if j != m-1:
+                if horizontal_multiplier_neg[i, j+1] == 0:
+                    horizontal_multiplier_neg[i,j] = 0
 
     total_weight = (horizontal_multiplier_pos 
                 + horizontal_multiplier_neg 
@@ -139,24 +180,12 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
                     + height_grid_px_y_neg * vertical_multiplier_neg)
                     / total_weight_safe
                 )
-
-
-    # height_grid_px_y = np.where(np.abs(height_grid_px_y_pos) < np.abs(height_grid_px_y_neg), height_grid_px_y_pos, height_grid_px_y_neg)
-    # height_grid_px_x = np.where(np.abs(height_grid_px_x_pos) < np.abs(height_grid_px_x_neg), height_grid_px_x_pos, height_grid_px_x_neg)
-    
-    height_grid_px_y = height_grid_px
-    height_grid_px_x = height_grid_px
-
-    figures = []
-    point_clouds = []
         
-    
     border_vals = np.concatenate([height_grid_px[0, :], height_grid_px[-1, :], height_grid_px[:, 0], height_grid_px[:, -1]])
     offset = np.mean(border_vals)
     height_grid_px -= offset
 
     # --- 3. Create a mask and set distant points to NaN ---
-    mask = distance_grid > max_dist_px
     st.write(f"Masking out {np.sum(mask)} points further than {max_dist_px} pixels from real data.")
     height_grid_px[mask] = np.nan
 
