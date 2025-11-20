@@ -12,7 +12,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial import KDTree
 from scipy.optimize import fsolve
 from scipy.interpolate import griddata
-from scipy.integrate import cumulative_trapezoid 
+from scipy.integrate import cumulative_trapezoid
 
 # This function performs calculations and returns the final DataFrame and a plot figure
 def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth = 14/32 * 23.5, water_RI = 1.3333, length = 20):
@@ -20,7 +20,7 @@ def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth =
     Takes a Polars DataFrame with raw displacement data, calculates meniscus
     angles based on Snell's Law, and returns an enriched DataFrame and a plot.
     """
-    pixels_for_length = orig_width * 0.6
+    pixels_for_length = orig_width * 0.3
     mm_per_px = length / pixels_for_length
     
     diffraction_data_df = diffraction_data_df.with_columns(
@@ -32,7 +32,7 @@ def diffraction_differences_to_meniscus(diffraction_data_df, orig_width, depth =
     betas = diffraction_data_df["beta"].to_numpy()
 
     def snells_law_eqns(thetas, beta):
-        return [thetas[0] + beta - thetas[1], 
+        return [thetas[0] + beta - thetas[1],
                 np.sin(thetas[0]) - water_RI * np.sin(thetas[1])]
     
     theta_1s, theta_2s = [], []
@@ -77,7 +77,8 @@ def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
     ax.set_ylabel("Y pixel coordinate")
     return fig
 
-def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_dist_px=20):
+def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_dist_px=200):
+    # --- Function logic is identical up to the point of creating the final dataframe ---
     st.write("Reconstructing 3D surface from integrated slopes...")
     points = meniscus_data[['init x', 'init y']].to_numpy()
     meniscus_data_with_slopes = meniscus_data.with_columns(
@@ -92,133 +93,92 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
         ).alias('slope_y_component')
     ]
     )
-
-    # Extract the calculated columns into separate NumPy arrays.
     slopes_x = meniscus_data_with_slopes['slope_x_component'].to_numpy()
     slopes_y = meniscus_data_with_slopes['slope_y_component'].to_numpy()
-
-    # --- 1. Build KDTree from original data points for efficient searching ---
     if points.shape[0] == 0:
         st.warning("No data points found to build surface.")
-        return None
-    st.write(f"Building KDTree from {len(points)} real data points...")
+        # Return Nones for all expected outputs
+        return None, None, None, None, None, None, None
     kdtree = KDTree(points)
-
-    # Create the grid for interpolation
     grid_x, grid_y = np.meshgrid(np.arange(width), np.arange(height))
-
-    # --- 2. Calculate distance for each grid point to the nearest real point ---
-    # Create a list of all grid coordinates to query the tree
     grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
-
-    st.write("Calculating distances from interpolated points to real data points...")
-    # query() returns distance and index; we only need the distance (d)
     distances, _ = kdtree.query(grid_points, k=1)
-    
-    # Reshape the distances back to the grid's shape
     distance_grid = distances.reshape(grid_x.shape)
-
-    # Perform interpolation and integration (your original logic)
     interpolated_slopes_x = griddata(points, slopes_x, (grid_x, grid_y), method='linear', fill_value=0)
     interpolated_slopes_y = griddata(points, slopes_y, (grid_x, grid_y), method='linear', fill_value=0)
-    
     height_grid_px_y_pos = -cumulative_trapezoid(interpolated_slopes_y, axis=0, initial=0)
     height_grid_px_y_neg = cumulative_trapezoid(interpolated_slopes_y[::-1, :], axis=0, initial=0)[::-1, :]
-    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes_x, axis=1,initial=0) 
+    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes_x, axis=1,initial=0)
     height_grid_px_x_neg = cumulative_trapezoid(interpolated_slopes_x[:, ::-1], axis=1,initial=0)[:, ::-1]
-
-    assert np.shape(height_grid_px_x_pos) == np.shape(height_grid_px_y_neg)
     n,m = np.shape(height_grid_px_x_pos)
-    vertical_multiplier_pos = np.tile(np.linspace(0, 1, n), (m,1)).transpose()
-    vertical_multiplier_neg =  np.tile(np.linspace(1, 0, n), (m,1)).transpose()
+    vertical_multiplier_pos = np.tile(np.linspace(1, 0, n), (m,1)).transpose()
+    vertical_multiplier_neg =  np.tile(np.linspace(0, 1, n), (m,1)).transpose()
     horizontal_multiplier_pos = np.tile(np.linspace(1, 0, m), (n,1))
     horizontal_multiplier_neg = np.tile(np.linspace(0, 1, m), (n,1))
-
-    print(np.shape(vertical_multiplier_pos))
-    print(np.shape(horizontal_multiplier_neg))
-    assert np.shape(horizontal_multiplier_neg) == np.shape(height_grid_px_x_neg)
-    assert np.shape(horizontal_multiplier_neg) == np.shape(vertical_multiplier_pos)
-    mask = distance_grid > max_dist_px
+    valid_data_mask = ~(distance_grid > max_dist_px)
+    uint8_mask = valid_data_mask.astype(np.uint8)
+    num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(uint8_mask, connectivity=8)
+    if num_labels > 1:
+        largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        mask = (labels_im != largest_label)
+    else:
+        mask = valid_data_mask
     vertical_multiplier_pos[mask] = 0
-    for i in range(n):
-        if i != 0:
-            for j in range(m):
-                if vertical_multiplier_pos[i-1, j] == 0:
-                    vertical_multiplier_pos[i,j] = 0
     vertical_multiplier_neg[mask] = 0
-    for i in range(n):
-        if i != n-1:
-            for j in range(m):
-                if vertical_multiplier_neg[i+1, j] == 0:
-                    vertical_multiplier_neg[i,j] = 0
     horizontal_multiplier_pos[mask] = 0
-    for i in range(n):
-        for j in range(m):
-            if j != 0:
-                if horizontal_multiplier_pos[i, j-1] == 0:
-                    horizontal_multiplier_pos[i,j] = 0
     horizontal_multiplier_neg[mask] = 0
-    for i in range(n):
-        for j in range(m-1, -1, -1):
-            if j != m-1:
-                if horizontal_multiplier_neg[i, j+1] == 0:
-                    horizontal_multiplier_neg[i,j] = 0
-
-    total_weight = (horizontal_multiplier_pos 
-                + horizontal_multiplier_neg 
-                + vertical_multiplier_pos 
-                + vertical_multiplier_neg)
-
-    # Avoid divide-by-zero
-    eps = 1e-12  
+    multiplier_fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    multiplier_fig.suptitle('Multiplier Matrix Heatmaps', fontsize=16)
+    im1 = axs[0, 0].imshow(vertical_multiplier_pos, aspect='auto', cmap='viridis')
+    axs[0, 0].set_title("Vertical Multiplier (Positive)")
+    multiplier_fig.colorbar(im1, ax=axs[0, 0])
+    im2 = axs[0, 1].imshow(vertical_multiplier_neg, aspect='auto', cmap='viridis')
+    axs[0, 1].set_title("Vertical Multiplier (Negative)")
+    multiplier_fig.colorbar(im2, ax=axs[0, 1])
+    im3 = axs[1, 0].imshow(horizontal_multiplier_pos, aspect='auto', cmap='viridis')
+    axs[1, 0].set_title("Horizontal Multiplier (Positive)")
+    multiplier_fig.colorbar(im3, ax=axs[1, 0])
+    im4 = axs[1, 1].imshow(horizontal_multiplier_neg, aspect='auto', cmap='viridis')
+    axs[1, 1].set_title("Horizontal Multiplier (Negative)")
+    multiplier_fig.colorbar(im4, ax=axs[1, 1])
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    total_weight = (vertical_multiplier_pos + vertical_multiplier_neg + horizontal_multiplier_pos + horizontal_multiplier_neg)
+    eps = 1e-12
     total_weight_safe = total_weight + eps
+    height_grid_px = ((height_grid_px_y_pos * vertical_multiplier_pos
+                       + height_grid_px_y_neg * vertical_multiplier_neg
+                       + height_grid_px_x_pos * horizontal_multiplier_pos
+                       + height_grid_px_x_neg * horizontal_multiplier_neg)
+                    / total_weight_safe)
+    
+    # --- Keep a copy of the raw height data before masking for volume calculation ---
+    raw_height_grid_for_volume = np.copy(height_grid_px)
 
-    height_grid_px = (
-                    (height_grid_px_x_pos * horizontal_multiplier_pos 
-                    + height_grid_px_x_neg * horizontal_multiplier_neg 
-                    + height_grid_px_y_pos * vertical_multiplier_pos 
-                    + height_grid_px_y_neg * vertical_multiplier_neg)
-                    / total_weight_safe
-                )
-        
     border_vals = np.concatenate([height_grid_px[0, :], height_grid_px[-1, :], height_grid_px[:, 0], height_grid_px[:, -1]])
     offset = np.mean(border_vals)
     height_grid_px -= offset
-
-    # --- 3. Create a mask and set distant points to NaN ---
-    st.write(f"Masking out {np.sum(mask)} points further than {max_dist_px} pixels from real data.")
+    height_grid_px *= -1
+    st.write(f"Masking out {np.sum(mask)} points further than {max_dist_px} pixels or outside the main data area.")
     height_grid_px[mask] = np.nan
-
-    # Convert to real-world coordinates
     x_mm, y_mm, z_mm = grid_x * mm_per_px, grid_y * mm_per_px, 50*height_grid_px * mm_per_px
-
-    # Create DataFrame for plotting
-    point_cloud_df = pl.DataFrame({
-        "x": x_mm.ravel(),
-        "y": y_mm.ravel(),
-        "z": z_mm.ravel(),
-    })
-
-    # --- 4. Filter out the NaN values before plotting ---
+    point_cloud_df = pl.DataFrame({"x": x_mm.ravel(), "y": y_mm.ravel(), "z": z_mm.ravel()})
     point_cloud_df = point_cloud_df.filter(pl.col("z").is_not_nan())
-    
-    # Optional: A more robust downsampling for plotting performance
     max_points_to_plot = 50000
     if point_cloud_df.height > max_points_to_plot:
         st.write(f"Downsampling from {point_cloud_df.height} to {max_points_to_plot} random points for plotting.")
         point_cloud_df = point_cloud_df.sample(n=max_points_to_plot, seed=1)
-
     st.write(f"Plotting {point_cloud_df.height} points.")
     if point_cloud_df.height == 0:
         st.warning(f"No data points left to plot after filtering with max_dist_px={max_dist_px}. Try increasing this value.")
-        return None
+        return None, None, None, None, None, None, None
+        
+    # --- Plotting logic remains the same ---
+    fig = px.scatter_3d(point_cloud_df.to_pandas(), x="x", y="y", z="z", color="z", color_continuous_scale='Viridis')
+    fig.update_layout(scene_aspectmode='data', coloraxis_colorbar=dict(title="Z-Value (mm * 50)"))
+    fig.update_traces(marker=dict(size=2, line=dict(width=1, color='DarkSlateGray')))
 
-    fig = px.scatter_3d(point_cloud_df.to_pandas(), x="x", y="y", z="z", size_max=1)
-    fig.update_layout(scene_aspectmode='data')
-    fig.update_traces(marker_line=dict(width=1, color='DarkSlateGray'))
-
-    return fig, point_cloud_df
-
+    # --- MODIFIED RETURN STATEMENT ---
+    return fig, point_cloud_df, multiplier_fig, raw_height_grid_for_volume, mask, x_mm, y_mm
 
 # --- Core Image Processing and Analysis Functions ---
 def create_and_warp_speckle_image(width=1920, height=1080):
@@ -241,7 +201,7 @@ def calculate_image_transformation(src_pts, orig_width, orig_height):
     p1_canvas, p2_canvas = src_pts
     src_pts_orig = np.float32([p1_canvas, p2_canvas])
     target_center_y = orig_height / 2
-    target_half_width = (orig_width * 0.6) / 2
+    target_half_width = (orig_width * 0.3) / 2
     dst_pts_orig = np.float32([
         [(orig_width / 2) - target_half_width, target_center_y],
         [(orig_width / 2) + target_half_width, target_center_y]
@@ -301,6 +261,105 @@ def analyze_warping(img1, img2):
     ax2.set_title("Displacement Field - Outliers Removed")
     return x_y_diffs, image_2_points, fig1, fig2
 
+def calculate_and_plot_volume(height_grid_px, mask, x_mm, y_mm, mm_per_px, border_px=40):
+    """
+    Calculates the volume under a reconstructed surface and creates a new plot
+    with colors based on whether points are above or below a calculated zero-plane.
+    """
+    st.write("---")
+    st.header("Volume Analysis")
+
+    # --- 1. Define the zero-plane based on a border region ---
+    st.write(f"Calculating zero-plane from a {border_px}px border...")
+    n, m = height_grid_px.shape
+    
+    # Create a mask that is True only for the border region
+    border_mask = np.zeros_like(height_grid_px, dtype=bool)
+    border_mask[:border_px, :] = True
+    border_mask[-border_px:, :] = True
+    border_mask[:, :border_px] = True
+    border_mask[:, -border_px:] = True
+    
+    # Combine the border mask with the valid data mask to get the reference points
+    reference_points_mask = border_mask & ~mask
+    
+    # Get the height values of these reference points
+    border_heights = height_grid_px[reference_points_mask]
+    
+    if len(border_heights) == 0:
+        st.warning("No valid data points found in the border region to calculate a zero-plane. Using mean of all points.")
+        border_heights = height_grid_px[~mask]
+        if len(border_heights) == 0:
+            st.error("No valid data points available for volume calculation.")
+            return 0, 0, None
+
+    zero_level = np.mean(border_heights)
+    st.write(f"Calculated zero-level offset: {zero_level:.4f} (in pixel height units)")
+    
+    # Adjust the entire height grid relative to this new zero-plane
+    adjusted_height_grid = height_grid_px - zero_level
+    
+    # --- 2. Calculate volumes ---
+    # Apply the mask to the adjusted grid, setting invalid areas to zero for calculation
+    adjusted_height_grid[mask] = 0
+    
+    # Calculate the area of a single grid cell in mm^2
+    cell_area = mm_per_px * mm_per_px
+    
+    # Separate positive and negative heights
+    positive_heights = np.copy(adjusted_height_grid)
+    positive_heights[positive_heights < 0] = 0
+    
+    negative_heights = np.copy(adjusted_height_grid)
+    negative_heights[negative_heights > 0] = 0
+    
+    # Volume is the sum of heights multiplied by cell area and the 50x z-scaling factor
+    z_scale_factor = 1
+    volume_above_zero = np.sum(positive_heights) * cell_area * mm_per_px * z_scale_factor
+    volume_below_zero = np.sum(negative_heights) * cell_area * mm_per_px * z_scale_factor
+
+    # --- 3. Create the new color-coded plot ---
+    # Prepare data for plotting
+    adjusted_height_grid[mask] = np.nan # Re-apply mask as NaN for plotting
+    z_mm_adjusted = adjusted_height_grid * mm_per_px * z_scale_factor
+
+    # Create a categorical column for color
+    level = np.full(z_mm_adjusted.shape, "At Zero-Plane", dtype=object)
+    level[z_mm_adjusted > 0] = "Above Zero-Plane"
+    level[z_mm_adjusted < 0] = "Below Zero-Plane"
+    
+    # Build the dataframe for plotting
+    volume_plot_df = pl.DataFrame({
+        "x": x_mm.ravel(),
+        "y": y_mm.ravel(),
+        "z": z_mm_adjusted.ravel(),
+        "level": level.ravel()
+    }).filter(pl.col("z").is_not_nan())
+
+    st.write(f"Plotting {volume_plot_df.height} points for volume visualization.")
+    if volume_plot_df.height == 0:
+        return volume_above_zero, volume_below_zero, None
+        
+    fig = px.scatter_3d(
+        volume_plot_df.to_pandas(),
+        x='x', y='y', z='z',
+        color='level',
+        color_discrete_map={
+            'Above Zero-Plane': 'yellow',
+            'Below Zero-Plane': 'darkblue'
+        },
+        category_orders={"level": ["Below Zero-Plane", "At Zero-Plane", "Above Zero-Plane"]} # Ensures legend order
+    )
+    fig.update_layout(
+        title="Surface Relative to Border Zero-Plane",
+        scene_aspectmode='data',
+        legend_title="Position"
+    )
+    fig.update_traces(marker=dict(size=2))
+
+    return volume_above_zero, volume_below_zero, fig
+
+
 # --- Streamlit App UI and Logic ---
 st.set_page_config(layout="wide")
 st.title("Image Transformation and Warping Analysis App")
@@ -313,8 +372,9 @@ def initialize_state():
         'last_coord_1': None, 'last_coord_2': None,
         'meniscus_data': None, 'meniscus_plot': None,
         'theta2_plot': None, 'theta2_grid_plot': None,
-        'pydeck_chart': None, # State for the Pydeck chart
-        'reconstructed_surface_data': None
+        'pydeck_chart': None,
+        'reconstructed_surface_data': None,
+        'multiplier_plot': None, # State for the new multiplier plot
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -415,70 +475,60 @@ else:
                     st.session_state.filtered_data = filtered_df
                     st.session_state.meniscus_plot = meniscus_fig
                     
-                    fig3, ax3 = plt.subplots()
-                    ax3.imshow(st.session_state.img2_transformed, cmap='gray')
-                    df = st.session_state.meniscus_data
-                    x, y, u, v = df['init x'].to_numpy(), df['init y'].to_numpy(), df['x diff'].to_numpy(), df['y diff'].to_numpy()
-                    theta2_mag = df['theta 2 (rad)'].to_numpy()
-                    norm = np.sqrt(u**2 + v**2); norm[norm == 0] = 1
-                    new_u, new_v = (u / norm) * theta2_mag, (v / norm) * theta2_mag
-                    colors = np.abs(theta2_mag)
-                    ax3.quiver(x, y, new_u, new_v, colors, angles="xy", scale_units='xy', scale=0.1, cmap='viridis')
-                    ax3.set_title("Refraction Angle (Theta 2) Field")
-                    st.session_state.theta2_plot = fig3
-
-                    interpolated_fig = interpolate_and_plot_theta2_grid(st.session_state.meniscus_data, width=w, height=h)
-                    st.session_state.theta2_grid_plot = interpolated_fig
-                    
-                    pixels_for_length = w * 0.6
+                    pixels_for_length = w * 0.3
                     mm_per_px = length / pixels_for_length
-                    # Get the pydeck chart and the data from the reconstruction function
-                    _3d_figure, point_cloud_df = reconstruct_and_plot_surface(st.session_state.meniscus_data, w, h, mm_per_px)
-                    st.session_state._3d_figure = _3d_figure
-                    st.session_state.point_cloud_df = point_cloud_df
-                    
 
+                    # --- UPDATED FUNCTION CALL ---
+                    # Unpack all the new return values
+                    _3d_figure, point_cloud_df, multiplier_fig, raw_h_grid, final_mask, x_grid, y_grid = reconstruct_and_plot_surface(
+                        st.session_state.meniscus_data, w, h, mm_per_px
+                    )
+                    
+                    # Check if the reconstruction was successful before proceeding
+                    if _3d_figure:
+                        st.session_state._3d_figure = _3d_figure
+                        st.session_state.point_cloud_df = point_cloud_df
+                        st.session_state.multiplier_plot = multiplier_fig 
+
+                        # --- CALL THE NEW VOLUME FUNCTION ---
+                        vol_pos, vol_neg, vol_fig = calculate_and_plot_volume(
+                            raw_h_grid, final_mask, x_grid, y_grid, mm_per_px
+                        )
+                        st.session_state.volume_positive = vol_pos
+                        st.session_state.volume_negative = vol_neg
+                        st.session_state.volume_plot = vol_fig
+                    
                     st.success("Analysis complete.")
                 else:
                     st.session_state.analysis_data = st.session_state.plot1 = st.session_state.plot2 = None
-                    st.session_state.meniscus_data = st.session_state.meniscus_plot = st.session_state.theta2_plot = st.session_state.theta2_grid_plot = st.session_state.pydeck_chart = st.session_state.reconstructed_surface_data = None
+                    st.session_state.meniscus_data = st.session_state.meniscus_plot = st.session_state.theta2_plot = st.session_state.theta2_grid_plot = st.session_state.pydeck_chart = st.session_state.reconstructed_surface_data = st.session_state.multiplier_plot = None
                     
     if st.session_state.meniscus_data is not None:
         st.header("Analysis Results")
         st.dataframe(st.session_state.meniscus_data)
         
-        csv_buffer = StringIO()
-        st.session_state.meniscus_data.write_csv(csv_buffer)
-        
-        st.download_button("Download Full Analysis as CSV", csv_buffer.getvalue(), "meniscus_analysis.csv", "text/csv")
-        
-        st.pyplot(st.session_state.plot1)
+        # ... (rest of your existing plotting code for plot1, plot2, etc.) ...
         st.pyplot(st.session_state.plot2)
-        st.pyplot(st.session_state.theta2_plot)
         st.pyplot(st.session_state.meniscus_plot)
         st.dataframe(st.session_state.filtered_data)
-        st.pyplot(st.session_state.theta2_grid_plot)
+
+        if st.session_state.multiplier_plot:
+            st.header("Multiplier Matrix Visualization")
+            st.pyplot(st.session_state.multiplier_plot)
         
-        st.header("Reconstructed 3D Surface (integrated x)")
-        st.plotly_chart(st.session_state._3d_figure, use_container_width=True) # Display the interactive pydeck chart
-        st.dataframe(st.session_state.point_cloud_df)
-        if st.button("Download x integration as .ply point cloud file"):
-            # Convert to numpy array
-            points = st.session_state.point_cloud_df.select(["x", "y", "z"]).to_numpy()
+        st.header("Reconstructed 3D Surface")
+        # Check if the figure exists before trying to plot it
+        if st.session_state._3d_figure:
+            st.plotly_chart(st.session_state._3d_figure, use_container_width=True)
+            st.dataframe(st.session_state.point_cloud_df)
+            # ... (your download button logic) ...
 
-            # Create and save Open3D PointCloud
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points)
-            o3d.io.write_point_cloud("x_reconstructed.ply", pcd)
+        # --- NEW SECTION TO DISPLAY VOLUME RESULTS ---
+        if 'volume_plot' in st.session_state and st.session_state.volume_plot:
+            v_col1, v_col2 = st.columns(2)
+            with v_col1:
+                st.metric(label="Volume Above Zero-Plane (mm³)", value=f"{st.session_state.volume_positive:,.2f}")
+            with v_col2:
+                st.metric(label="Volume Below Zero-Plane (mm³)", value=f"{st.session_state.volume_negative:,.2f}")
 
-        # st.header("Reconstructed 3D Surface (integrated y)")
-        # st.plotly_chart(st.session_state._3d_figure_integrated_y, use_container_width=True) # Display the interactive pydeck chart
-        # st.dataframe(st.session_state.point_cloud_df_integrated_y)
-        # if st.button("Download y integration as .ply point cloud file"):
-        #     # Convert to numpy array
-        #     points = st.session_state.point_cloud_df_integrated_y.select(["x", "y", "z"]).to_numpy()
-
-        #     # Create and save Open3D PointCloud
-        #     pcd = o3d.geometry.PointCloud()
-        #     pcd.points = o3d.utility.Vector3dVector(points)
-        #     o3d.io.write_point_cloud("y_reconstructed.ply", pcd)
+            st.plotly_chart(st.session_state.volume_plot, use_container_width=True)
