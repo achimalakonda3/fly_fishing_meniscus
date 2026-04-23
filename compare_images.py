@@ -6,7 +6,6 @@ import numpy as np
 import cv2
 import polars as pl
 import plotly.express as px
-from io import StringIO
 from streamlit_image_coordinates import streamlit_image_coordinates
 from sklearn.neighbors import NearestNeighbors
 from scipy.spatial import KDTree
@@ -77,6 +76,37 @@ def interpolate_and_plot_theta2_grid(meniscus_data, width, height):
     ax.set_ylabel("Y pixel coordinate")
     return fig
 
+def frankot_chellappa(dzdx, dzdy):
+    """
+    Reconstructs a 3D surface from 2D gradient fields using the 
+    Frankot-Chellappa algorithm (Frequency Domain).
+    """
+    rows, cols = dzdx.shape
+    
+    # Create frequency grids
+    u = np.fft.fftfreq(cols)
+    v = np.fft.fftfreq(rows)
+    U, V = np.meshgrid(u, v)
+    
+    # Angular frequencies
+    wx = 2 * np.pi * U
+    wy = 2 * np.pi * V
+    
+    # FFT of gradients
+    Zx = np.fft.fft2(dzdx)
+    Zy = np.fft.fft2(dzdy)
+    
+    # Integrate in frequency domain: Z = (-i*wx*Zx - i*wy*Zy) / (wx^2 + wy^2)
+    denom = wx**2 + wy**2
+    denom[0, 0] = 1  # Avoid division by zero at DC component
+    
+    Z_f = (-1j * wx * Zx - 1j * wy * Zy) / denom
+    Z_f[0, 0] = 0    # Anchor the mean height to 0
+    
+    # Inverse FFT to get spatial surface
+    Z = np.real(np.fft.ifft2(Z_f))
+    return Z
+
 def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_dist_px=200):
     # --- Function logic is identical up to the point of creating the final dataframe ---
     st.write("Reconstructing 3D surface from integrated slopes...")
@@ -106,15 +136,15 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
     distance_grid = distances.reshape(grid_x.shape)
     interpolated_slopes_x = griddata(points, slopes_x, (grid_x, grid_y), method='linear', fill_value=0)
     interpolated_slopes_y = griddata(points, slopes_y, (grid_x, grid_y), method='linear', fill_value=0)
-    height_grid_px_y_pos = -cumulative_trapezoid(interpolated_slopes_y, axis=0, initial=0)
-    height_grid_px_y_neg = cumulative_trapezoid(interpolated_slopes_y[::-1, :], axis=0, initial=0)[::-1, :]
-    height_grid_px_x_pos = cumulative_trapezoid(interpolated_slopes_x, axis=1,initial=0)
-    height_grid_px_x_neg = cumulative_trapezoid(interpolated_slopes_x[:, ::-1], axis=1,initial=0)[:, ::-1]
-    n,m = np.shape(height_grid_px_x_pos)
-    vertical_multiplier_pos = np.tile(np.linspace(1, 0, n), (m,1)).transpose()
-    vertical_multiplier_neg =  np.tile(np.linspace(0, 1, n), (m,1)).transpose()
-    horizontal_multiplier_pos = np.tile(np.linspace(1, 0, m), (n,1))
-    horizontal_multiplier_neg = np.tile(np.linspace(0, 1, m), (n,1))
+    interpolated_slopes_x = griddata(points, slopes_x, (grid_x, grid_y), method='linear', fill_value=0)
+    interpolated_slopes_y = griddata(points, slopes_y, (grid_x, grid_y), method='linear', fill_value=0)
+
+    # Reconstruct perfectly smooth surface from slopes
+    height_grid_px = frankot_chellappa(interpolated_slopes_x, interpolated_slopes_y)
+    
+    # (Your masking logic stays exactly the same)
+    multiplier_fig = None
+    
     valid_data_mask = ~(distance_grid > max_dist_px)
     uint8_mask = valid_data_mask.astype(np.uint8)
     num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(uint8_mask, connectivity=8)
@@ -123,34 +153,7 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
         mask = (labels_im != largest_label)
     else:
         mask = valid_data_mask
-    vertical_multiplier_pos[mask] = 0
-    vertical_multiplier_neg[mask] = 0
-    horizontal_multiplier_pos[mask] = 0
-    horizontal_multiplier_neg[mask] = 0
-    multiplier_fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    multiplier_fig.suptitle('Multiplier Matrix Heatmaps', fontsize=16)
-    im1 = axs[0, 0].imshow(vertical_multiplier_pos, aspect='auto', cmap='viridis')
-    axs[0, 0].set_title("Vertical Multiplier (Positive)")
-    multiplier_fig.colorbar(im1, ax=axs[0, 0])
-    im2 = axs[0, 1].imshow(vertical_multiplier_neg, aspect='auto', cmap='viridis')
-    axs[0, 1].set_title("Vertical Multiplier (Negative)")
-    multiplier_fig.colorbar(im2, ax=axs[0, 1])
-    im3 = axs[1, 0].imshow(horizontal_multiplier_pos, aspect='auto', cmap='viridis')
-    axs[1, 0].set_title("Horizontal Multiplier (Positive)")
-    multiplier_fig.colorbar(im3, ax=axs[1, 0])
-    im4 = axs[1, 1].imshow(horizontal_multiplier_neg, aspect='auto', cmap='viridis')
-    axs[1, 1].set_title("Horizontal Multiplier (Negative)")
-    multiplier_fig.colorbar(im4, ax=axs[1, 1])
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    total_weight = (vertical_multiplier_pos + vertical_multiplier_neg + horizontal_multiplier_pos + horizontal_multiplier_neg)
-    eps = 1e-12
-    total_weight_safe = total_weight + eps
-    height_grid_px = ((height_grid_px_y_pos * vertical_multiplier_pos
-                       + height_grid_px_y_neg * vertical_multiplier_neg
-                       + height_grid_px_x_pos * horizontal_multiplier_pos
-                       + height_grid_px_x_neg * horizontal_multiplier_neg)
-                    / total_weight_safe)
-    
+        
     # --- Keep a copy of the raw height data before masking for volume calculation ---
     raw_height_grid_for_volume = np.copy(height_grid_px)
 
@@ -172,12 +175,10 @@ def reconstruct_and_plot_surface(meniscus_data, width, height, mm_per_px, max_di
         st.warning(f"No data points left to plot after filtering with max_dist_px={max_dist_px}. Try increasing this value.")
         return None, None, None, None, None, None, None
         
-    # --- Plotting logic remains the same ---
     fig = px.scatter_3d(point_cloud_df.to_pandas(), x="x", y="y", z="z", color="z", color_continuous_scale='Viridis')
     fig.update_layout(scene_aspectmode='data', coloraxis_colorbar=dict(title="Z-Value (mm * 50)"))
     fig.update_traces(marker=dict(size=2, line=dict(width=1, color='DarkSlateGray')))
 
-    # --- MODIFIED RETURN STATEMENT ---
     return fig, point_cloud_df, multiplier_fig, raw_height_grid_for_volume, mask, x_mm, y_mm
 
 # --- Core Image Processing and Analysis Functions ---
@@ -209,7 +210,7 @@ def calculate_image_transformation(src_pts, orig_width, orig_height):
     transformation_matrix, _ = cv2.estimateAffinePartial2D(src_pts_orig, dst_pts_orig)
     return transformation_matrix
 
-def analyze_warping(img1, img2):
+def analyze_warping(img1, img2, main_transform):
     sift = cv2.SIFT_create()
     kp1, des1 = sift.detectAndCompute(img1, None)
     kp2, des2 = sift.detectAndCompute(img2, None)
@@ -229,6 +230,14 @@ def analyze_warping(img1, img2):
     image_2_points, x_y_diffs_temp = np.array(image_2_points_temp), np.array(x_y_diffs_temp)
     mask = np.linalg.norm(x_y_diffs_temp[:, :2], axis=1) <= 50
     x_y_diffs, image_2_points = x_y_diffs_temp[mask], image_2_points[mask]
+
+    border_mask = (image_2_points[1,:] < 250) | \
+              (image_2_points[1,:] > 2800) | \
+              (image_2_points[0,:] < 500) | \
+              (image_2_points[0,:] > 4500)
+    border_diffs = x_y_diffs[:,border_mask]
+    mean_diffs = np.mean(border_diffs, axis = 0)
+    print(f"mean diffs around border: {mean_diffs}")
 
     if len(x_y_diffs) > 5:
         st.write("Performing outlier removal based on local vector magnitudes...")
@@ -443,6 +452,7 @@ else:
                 st.session_state.img1_transformed = cv2.warpAffine(img1_np, trans_matrix, (w, h))
                 st.session_state.img2_transformed = cv2.warpAffine(img2_np, trans_matrix, (w, h))
                 st.success("Transformation applied successfully!")
+                st.session_state.trans_matrix = trans_matrix
             else:
                 st.error("Could not estimate transformation. Try selecting different points.")
 
@@ -463,7 +473,7 @@ else:
         if st.button("Analyze Warping and Post-Process"):
             with st.spinner("Analyzing images..."):
                 h, w = st.session_state.img1_transformed.shape
-                diffs, pts, fig1, fig2 = analyze_warping(st.session_state.img1_transformed, st.session_state.img2_transformed)
+                diffs, pts, fig1, fig2 = analyze_warping(st.session_state.img1_transformed, st.session_state.img2_transformed, st.session_state.trans_matrix)
                 if diffs is not None and len(diffs) > 0:
                     st.session_state.analysis_data = np.hstack((diffs, pts))
                     st.session_state.plot1, st.session_state.plot2 = fig1, fig2
@@ -478,7 +488,6 @@ else:
                     pixels_for_length = w * 0.3
                     mm_per_px = length / pixels_for_length
 
-                    # --- UPDATED FUNCTION CALL ---
                     # Unpack all the new return values
                     _3d_figure, point_cloud_df, multiplier_fig, raw_h_grid, final_mask, x_grid, y_grid = reconstruct_and_plot_surface(
                         st.session_state.meniscus_data, w, h, mm_per_px
@@ -490,7 +499,7 @@ else:
                         st.session_state.point_cloud_df = point_cloud_df
                         st.session_state.multiplier_plot = multiplier_fig 
 
-                        # --- CALL THE NEW VOLUME FUNCTION ---
+                        # Volume function call
                         vol_pos, vol_neg, vol_fig = calculate_and_plot_volume(
                             raw_h_grid, final_mask, x_grid, y_grid, mm_per_px
                         )
@@ -507,7 +516,6 @@ else:
         st.header("Analysis Results")
         st.dataframe(st.session_state.meniscus_data)
         
-        # ... (rest of your existing plotting code for plot1, plot2, etc.) ...
         st.pyplot(st.session_state.plot2)
         st.pyplot(st.session_state.meniscus_plot)
         st.dataframe(st.session_state.filtered_data)
@@ -523,7 +531,7 @@ else:
             st.dataframe(st.session_state.point_cloud_df)
             # ... (your download button logic) ...
 
-        # --- NEW SECTION TO DISPLAY VOLUME RESULTS ---
+        # Display volume results
         if 'volume_plot' in st.session_state and st.session_state.volume_plot:
             v_col1, v_col2 = st.columns(2)
             with v_col1:
